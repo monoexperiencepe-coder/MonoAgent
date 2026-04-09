@@ -1,7 +1,12 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import { fileURLToPath } from "url";
+import { dirname, join } from "path";
 import { generateResponse } from "./src/services/aiService.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const app = express();
 app.use(
@@ -12,10 +17,6 @@ app.use(
   })
 );
 app.use(express.json());
-
-app.get("/", (_req, res) => {
-  res.json({ status: "ok" });
-});
 
 app.post("/chat", async (req, res) => {
   const { message, systemPrompt, faqs } = req.body ?? {};
@@ -40,14 +41,23 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => {
-  console.log(`Servidor en puerto ${PORT}`);
+app.use(express.static(join(__dirname, "client/dist")));
+app.get("/{*path}", (req, res) => {
+  res.sendFile(join(__dirname, "client/dist/index.html"));
 });
 
-server.on("error", (err) => {
-  if (err.code === "EADDRINUSE") {
-    console.error(`Puerto ${PORT} ocupado. Cambia PORT en .env`);
-    process.exit(1);
-  }
-});
+export default app;
+
+const PORT = process.env.PORT || 3000;
+if (!process.env.VERCEL) {
+  const server = app.listen(PORT, () => {
+    console.log(`Servidor en puerto ${PORT}`);
+  });
+
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`Puerto ${PORT} ocupado. Cambia PORT en .env`);
+      process.exit(1);
+    }
+  });
+}

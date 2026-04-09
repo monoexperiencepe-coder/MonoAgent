@@ -1,7 +1,8 @@
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:3000";
+const BASE_URL =
+  import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? "http://localhost:3000" : "");
 
 export async function sendChat({ message, systemPrompt, faqs }) {
-  const res = await fetch(`${API_BASE}/chat`, {
+  const res = await fetch(`${BASE_URL}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ message, systemPrompt, faqs }),
