@@ -93,17 +93,47 @@ function extractItems(message) {
     .sort((a, b) => order.indexOf(a.size) - order.indexOf(b.size));
 }
 
+/** Indecisión entre tallas sin cantidades (ej. "m o l", "entre m y l"). Mínimo 2 tallas distintas. */
+function detectSizeCandidates(m) {
+  const lower = String(m).trim().toLowerCase();
+  const sz = SIZE_ALT;
+  const patterns = [
+    String.raw`\btallas?\s+${sz}\s+(?:o|u|y)\s+${sz}\b`,
+    String.raw`\b${sz}\s+(?:o|u|y)\s+${sz}\b`,
+    String.raw`\bentre\s+(?:la\s+)?${sz}\s+y\s+(?:la\s+)?${sz}\b`,
+  ];
+  const found = new Set();
+  for (const p of patterns) {
+    const re = new RegExp(p, "gi");
+    let ma;
+    while ((ma = re.exec(lower)) !== null) {
+      for (let i = 1; i < ma.length; i++) {
+        if (ma[i]) {
+          const k = normSizeToken(ma[i]);
+          if (k) found.add(k);
+        }
+      }
+    }
+  }
+  if (found.size < 2) return null;
+  const order = ["S", "M", "L", "XL"];
+  return [...found].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+}
+
 function sessionFromStored(stored) {
   if (!stored) {
-    return { product: null, items: [], stage: "exploration" };
+    return { product: null, items: [], sizeCandidates: [], stage: "exploration" };
   }
   const raw = Array.isArray(stored.items)
     ? stored.items.map((i) => ({ size: i.size, qty: Number(i.qty) }))
     : [];
   const items = mergeItems([], raw);
+  const rawCand = stored.sizeCandidates ?? stored.size_candidates;
+  const sizeCandidates = Array.isArray(rawCand) ? [...rawCand] : [];
   return {
     product: stored.product ?? null,
     items,
+    sizeCandidates,
     stage: stored.stage ?? "exploration",
   };
 }
@@ -154,10 +184,19 @@ function updateSession(session, message) {
   if (!Array.isArray(session.items)) {
     session.items = [];
   }
+  if (!Array.isArray(session.sizeCandidates)) {
+    session.sizeCandidates = [];
+  }
 
   const incoming = extractItems(message);
   if (incoming.length > 0) {
     session.items = mergeItems(session.items, incoming);
+    session.sizeCandidates = [];
+  } else if (session.product && !hasLineItems(session)) {
+    const cand = detectSizeCandidates(m);
+    if (cand && cand.length >= 2) {
+      session.sizeCandidates = cand;
+    }
   }
 
   session.items = mergeItems([], session.items);
@@ -171,12 +210,18 @@ function sessionStateForPrompt(session) {
   return {
     product: session.product,
     items: session.items,
+    sizeCandidates: Array.isArray(session.sizeCandidates) ? session.sizeCandidates : [],
     stage: session.stage,
   };
 }
 
 function buildSessionSystemAugmentation(session) {
   const lines = formatItemsHuman(session.items);
+  const cand = Array.isArray(session.sizeCandidates) ? session.sizeCandidates : [];
+  const candLine =
+    cand.length >= 2
+      ? `El cliente está evaluando entre las tallas: ${cand.join(", ")} — ayúdalo a decidir, NO muestres el catálogo general`
+      : "";
   return `
 
 ESTADO ACTUAL DEL CLIENTE (JSON; items[] = una entrada por talla, sin colapsar):
@@ -184,6 +229,8 @@ ${JSON.stringify(sessionStateForPrompt(session))}
 
 Desglose obligatorio (repite tal cual en confirmaciones; formato compacto tipo "2 M y 1 L"):
 ${lines}
+
+${candLine ? `${candLine}\n` : ""}
 
 PROHIBIDO: sumar cantidades de tallas distintas y expresarlas como una sola talla (ej. NO "3 M" si en realidad es 2 M + 1 L).
 
@@ -268,6 +315,7 @@ app.post("/chat", async (req, res) => {
 
     const session = sessionFromStored(stored);
     if (!Array.isArray(session.items)) session.items = [];
+    if (!Array.isArray(session.sizeCandidates)) session.sizeCandidates = [];
     session.product = session.product ?? null;
     session.stage = session.stage ?? "exploration";
 
