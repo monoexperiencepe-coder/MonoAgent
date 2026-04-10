@@ -13,24 +13,25 @@ import { getSession, saveSession } from "./src/lib/sessions.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-function defaultSessionState() {
+function sessionFromStored(stored) {
   return {
-    product: null,
-    size: null,
-    quantity: null,
-    stage: "exploration",
+    product: stored?.product ?? null,
+    size: stored?.size ?? null,
+    quantity: stored?.quantity ?? null,
+    stage: stored?.stage ?? "exploration",
   };
 }
 
-function sessionFromStored(stored) {
-  const base = defaultSessionState();
-  if (!stored || typeof stored !== "object") return base;
-  return {
-    product: stored.product ?? base.product,
-    size: stored.size ?? base.size,
-    quantity: stored.quantity ?? base.quantity,
-    stage: stored.stage ?? base.stage,
-  };
+function sizeFromMessage(m) {
+  const map = { s: "S", m: "M", l: "L", xl: "XL" };
+  const phrase = m.match(/\btallas?\s*[:\s]*\b(s|m|l|xl)\b/);
+  if (phrase) return map[phrase[1]];
+  if (m in map) return map[m];
+  if (/\bxl\b/.test(m)) return "XL";
+  if (/\bl\b/.test(m)) return "L";
+  if (/\bm\b/.test(m)) return "M";
+  if (/\bs\b/.test(m)) return "S";
+  return null;
 }
 
 function updateSession(session, message) {
@@ -40,9 +41,9 @@ function updateSession(session, message) {
     session.product = "high_cotton";
   }
 
-  const sizeByToken = { s: "S", m: "M", l: "L", xl: "XL" };
-  if (m in sizeByToken) {
-    session.size = sizeByToken[m];
+  const detectedSize = sizeFromMessage(m);
+  if (detectedSize) {
+    session.size = detectedSize;
   }
 
   if (/\bdame\s+2\b/.test(m) || /\bquiero\s+2\b/.test(m) || m === "2") {
@@ -60,6 +61,8 @@ function updateSession(session, message) {
   } else {
     session.stage = "exploration";
   }
+
+  console.log("[SESSION] Estado actualizado:", session);
 }
 
 function sessionStateForPrompt(session) {
@@ -76,6 +79,8 @@ function buildSessionSystemAugmentation(session) {
 
 ESTADO ACTUAL DEL CLIENTE:
 ${JSON.stringify(sessionStateForPrompt(session))}
+
+El cliente ya eligió talla: ${session.size ?? "no especificada"}
 
 REGLAS IMPORTANTES:
 
