@@ -8,23 +8,10 @@ import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { generateResponse } from "./src/services/aiService.js";
-import { getSession, saveSession } from "./src/lib/sessions.js";
+import { getSession, saveSession, mergeItems } from "./src/lib/sessions.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-
-function sessionFromStored(stored) {
-  const size =
-    stored?.size && typeof stored.size === "object" && !Array.isArray(stored.size)
-      ? { ...stored.size }
-      : null;
-  return {
-    product: stored?.product ?? null,
-    size: size && Object.keys(size).length ? size : null,
-    quantity: stored?.quantity ?? null,
-    stage: stored?.stage ?? "exploration",
-  };
-}
 
 const WORD_NUM = {
   uno: 1,
@@ -37,79 +24,123 @@ const WORD_NUM = {
 
 function parseQtyToken(tok) {
   if (/^\d+$/.test(tok)) return parseInt(tok, 10);
-  const w = WORD_NUM[tok.toLowerCase()];
+  const w = WORD_NUM[String(tok).toLowerCase()];
   return w ?? null;
 }
 
 function normSizeToken(tok) {
-  const t = tok.toLowerCase();
+  const t = String(tok).toLowerCase();
   if (t === "xl") return "XL";
   if (t === "s" || t === "m" || t === "l") return t.toUpperCase();
   return null;
 }
 
-/** Devuelve { S: n, M: n, ... } o null si no hay coincidencias en este mensaje. */
-function sizeFromMessage(m) {
-  const lower = String(m).trim().toLowerCase();
-  const out = {};
-  const qty = String.raw`(\d+|uno|dos|tres|cuatro|cinco|seis)`;
-  const sz = String.raw`(xl|s|m|l)`;
+const QTY_WORD = String.raw`(\d+|uno|dos|tres|cuatro|cinco|seis)`;
+const SIZE_ALT = String.raw`(xl|s|m|l)`;
 
-  const reEnTalla = new RegExp(`${qty}\\s+en\\s+talla\\s+${sz}\\b`, "gi");
-  let ma;
-  while ((ma = reEnTalla.exec(lower)) !== null) {
-    const n = parseQtyToken(ma[1]);
-    const k = normSizeToken(ma[2]);
-    if (n != null && k) out[k] = (out[k] || 0) + n;
+/**
+ * Orden fijo; cada fase consume spans en `working` para evitar doble conteo.
+ * 1) N en (talla)? talla
+ * 2) talla x cantidad
+ * 3) N+talla pegado (solo dígitos)
+ * 4) cantidad + talla separados (lookahead anti "2 modelos")
+ * 5) fallback: solo talla → qty 1
+ */
+function extractItems(message) {
+  const orig = String(message).trim().toLowerCase();
+  let working = orig;
+  const map = new Map();
+
+  function add(sizeTok, qtyTok) {
+    const size = normSizeToken(sizeTok);
+    const qty = typeof qtyTok === "number" ? qtyTok : parseQtyToken(String(qtyTok));
+    if (!size || qty == null || qty < 1) return;
+    map.set(size, (map.get(size) || 0) + qty);
   }
 
-  const reShort = new RegExp(`(^|\\s)${qty}\\s+${sz}(?=\\s|$|[,.]|\\s+y\\b)`, "gi");
-  while ((ma = reShort.exec(lower)) !== null) {
-    const n = parseQtyToken(ma[2]);
-    const k = normSizeToken(ma[3]);
-    if (n != null && k) out[k] = (out[k] || 0) + n;
+  function runPhase(source, onMatch) {
+    for (let guard = 0; guard < 64; guard++) {
+      const re = new RegExp(source, "gi");
+      const m = re.exec(working);
+      if (!m) break;
+      onMatch(m);
+      working = working.slice(0, m.index) + " ".repeat(m[0].length) + working.slice(m.index + m[0].length);
+    }
   }
 
-  if (Object.keys(out).length > 0) {
-    return out;
+  runPhase(String.raw`(\d+)\s+en\s+(?:talla\s+)${SIZE_ALT}\b`, (m) => add(m[2], m[1]));
+  runPhase(String.raw`(\d+)\s+en\s+${SIZE_ALT}\b`, (m) => add(m[2], m[1]));
+
+  runPhase(String.raw`\b${SIZE_ALT}\s*[x×]\s*${QTY_WORD}\b`, (m) => add(m[1], m[2]));
+
+  runPhase(String.raw`\b(\d+)${SIZE_ALT}\b`, (m) => add(m[2], parseInt(m[1], 10)));
+
+  runPhase(String.raw`(^|\s)${QTY_WORD}\s+${SIZE_ALT}(?=\s|$|[,.]|\s+y\b)`, (m) => add(m[3], m[2]));
+
+  if (map.size === 0) {
+    const solo = orig.match(/^\s*(xl|s|m|l)\s*$/i);
+    if (solo) add(solo[1], 1);
+    else {
+      const ph = orig.match(/\btallas?\s*[:\s]*\b(xl|s|m|l)\b/i);
+      if (ph) add(ph[1], 1);
+    }
   }
 
-  const phrase = lower.match(/\btallas?\s*[:\s]*\b(xl|s|m|l)\b/);
-  if (phrase) {
-    const k = normSizeToken(phrase[1]);
-    if (k) return { [k]: 1 };
-  }
-
-  if (lower === "s" || lower === "m" || lower === "l" || lower === "xl") {
-    const k = normSizeToken(lower);
-    if (k) return { [k]: 1 };
-  }
-
-  return null;
-}
-
-function hasPositiveSizeBreakdown(size) {
-  return (
-    size &&
-    typeof size === "object" &&
-    Object.values(size).some((n) => Number(n) > 0)
-  );
-}
-
-function formatSizeBreakdownLine(size) {
-  if (!hasPositiveSizeBreakdown(size)) {
-    return "no especificado";
-  }
   const order = ["S", "M", "L", "XL"];
-  const entries = Object.entries(size)
-    .filter(([, n]) => Number(n) > 0)
-    .sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
-  return entries
-    .map(([sz, n]) => {
-      const u = Number(n) === 1 ? "unidad" : "unidades";
-      return `${n} ${u} talla ${sz}`;
-    })
-    .join(", ");
+  return [...map.entries()]
+    .map(([size, qty]) => ({ size, qty }))
+    .sort((a, b) => order.indexOf(a.size) - order.indexOf(b.size));
+}
+
+function sessionFromStored(stored) {
+  if (!stored) {
+    return { product: null, items: [], stage: "exploration" };
+  }
+  const raw = Array.isArray(stored.items)
+    ? stored.items.map((i) => ({ size: i.size, qty: Number(i.qty) }))
+    : [];
+  const items = mergeItems([], raw);
+  return {
+    product: stored.product ?? null,
+    items,
+    stage: stored.stage ?? "exploration",
+  };
+}
+
+function hasLineItems(session) {
+  return Array.isArray(session.items) && session.items.some((i) => Number(i.qty) > 0);
+}
+
+function totalItemQty(session) {
+  return (session.items || []).reduce((s, i) => {
+    const q = Number(i.qty);
+    return s + (Number.isFinite(q) && q > 0 ? q : 0);
+  }, 0);
+}
+
+function formatItemsHuman(items) {
+  if (!Array.isArray(items) || !items.length) return "ninguna línea todavía";
+  const order = ["S", "M", "L", "XL"];
+  const rows = items
+    .filter((i) => Number(i.qty) > 0)
+    .sort((a, b) => order.indexOf(a.size) - order.indexOf(b.size));
+  return rows.map((i) => `${i.qty} ${i.size}`).join(" y ");
+}
+
+function recomputeStage(session) {
+  if (!session.product) {
+    session.stage = "exploration";
+    return;
+  }
+  if (!hasLineItems(session)) {
+    session.stage = "interest";
+    return;
+  }
+  if (totalItemQty(session) >= 2) {
+    session.stage = "closing";
+  } else {
+    session.stage = "intention";
+  }
 }
 
 function updateSession(session, message) {
@@ -119,31 +150,18 @@ function updateSession(session, message) {
     session.product = "high_cotton";
   }
 
-  const delta = sizeFromMessage(m);
-  if (delta && Object.keys(delta).length) {
-    session.size = { ...(session.size && typeof session.size === "object" ? session.size : {}), ...delta };
-  }
-  if (session.size && typeof session.size === "object" && !Object.keys(session.size).length) {
-    session.size = null;
+  if (!Array.isArray(session.items)) {
+    session.items = [];
   }
 
-  if (/\bdame\s+2\b/.test(m) || /\bquiero\s+2\b/.test(m) || m === "2") {
-    session.quantity = 2;
-  } else if (/\bdame\s+3\b/.test(m) || /\bquiero\s+3\b/.test(m) || m === "3") {
-    session.quantity = 3;
+  const incoming = extractItems(message);
+  if (incoming.length > 0) {
+    session.items = mergeItems(session.items, incoming);
   }
 
-  const hasSizes = hasPositiveSizeBreakdown(session.size);
+  session.items = mergeItems([], session.items);
 
-  if (session.product && hasSizes) {
-    session.stage = "closing";
-  } else if (session.product && session.quantity != null) {
-    session.stage = "intention";
-  } else if (session.product) {
-    session.stage = "interest";
-  } else {
-    session.stage = "exploration";
-  }
+  recomputeStage(session);
 
   console.log("[SESSION] Estado actualizado:", session);
 }
@@ -151,34 +169,38 @@ function updateSession(session, message) {
 function sessionStateForPrompt(session) {
   return {
     product: session.product,
-    size: session.size,
-    quantity: session.quantity,
+    items: session.items,
     stage: session.stage,
   };
 }
 
 function buildSessionSystemAugmentation(session) {
+  const lines = formatItemsHuman(session.items);
   return `
 
-ESTADO ACTUAL DEL CLIENTE:
+ESTADO ACTUAL DEL CLIENTE (JSON; items[] = una entrada por talla, sin colapsar):
 ${JSON.stringify(sessionStateForPrompt(session))}
 
-El cliente eligió: ${formatSizeBreakdownLine(session.size)}
+Desglose obligatorio (repite tal cual en confirmaciones; formato compacto tipo "2 M y 1 L"):
+${lines}
+
+PROHIBIDO: sumar cantidades de tallas distintas y expresarlas como una sola talla (ej. NO "3 M" si en realidad es 2 M + 1 L).
 
 REGLAS IMPORTANTES:
 
 * Usa este estado para mantener contexto
 * No reinicies la conversación
 * No cambies de producto si ya hay uno definido
-* Si stage = "intention", enfócate en cerrar
-* Si stage = "closing", confirma el pedido directamente
+* Cada elemento de items[] es independiente: nunca fusiones tallas ni redistribuyas cantidades entre tallas
+* Si stage = "intention", enfócate en completar unidades y cerrar
+* Si stage = "closing", confirma el pedido con el desglose por talla y pide datos para pago
 
 COMPORTAMIENTO SEGÚN stage:
 
 * exploration: puedes mostrar promos completas
-* interest: responde de forma puntual, no repitas todo el catálogo ni promos enteras sin necesidad
-* intention: confirma producto y talla; sugiere mínimo 2 unidades; impulsa el cierre
-* closing: confirma el pedido indicando producto, talla, cantidad y precio correcto según la información definida; pide los datos del cliente para completar
+* interest: responde de forma puntual; aún no hay líneas en items
+* intention: hay líneas en items; refuerza mínimo de unidades si aplica
+* closing: listo para pago; confirma producto, cada talla con su cantidad y precios según información definida
 
 COHERENCIA DEL PRODUCTO (crítico):
 
@@ -241,10 +263,10 @@ app.post("/chat", async (req, res) => {
 
     updateSession(session, trimmedMessage);
 
-    const messages = sessionStateForPrompt(session);
-    console.log("[SESSION] Guardando sesión:", sessionId, messages);
+    const stateSnapshot = sessionStateForPrompt(session);
+    console.log("[SESSION] Guardando sesión:", sessionId, stateSnapshot);
     try {
-      await saveSession(sessionId, messages);
+      await saveSession(sessionId, stateSnapshot);
     } catch (error) {
       console.error("[SESSION] Error guardando:", error);
       throw error;

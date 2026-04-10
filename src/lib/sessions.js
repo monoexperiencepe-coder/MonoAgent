@@ -1,54 +1,136 @@
 import { getSupabase } from "./supabase.js";
 
+const VALID_SIZES = new Set(["S", "M", "L", "XL"]);
+
 function normalizeSizeKey(k) {
   const u = String(k).trim().toUpperCase();
-  if (u === "S" || u === "M" || u === "L" || u === "XL") return u;
-  return null;
+  return VALID_SIZES.has(u) ? u : null;
 }
 
-function normalizeSizeField(size, quantity) {
-  if (size == null) return null;
-  if (typeof size === "string") {
-    const nk = normalizeSizeKey(size);
-    if (!nk) return null;
-    const q = quantity != null && Number(quantity) > 0 ? Number(quantity) : 1;
-    return { [nk]: q };
+function legacyFromMessages(msg) {
+  if (!msg || typeof msg !== "object") return null;
+  if (Array.isArray(msg.items)) {
+    return {
+      product: msg.product ?? null,
+      items: normalizeItemsArray(msg.items),
+      stage: msg.stage ?? "exploration",
+    };
   }
-  if (typeof size === "object" && !Array.isArray(size)) {
-    const out = {};
-    for (const [key, val] of Object.entries(size)) {
+  const items = [];
+  if (msg.size && typeof msg.size === "object" && !Array.isArray(msg.size)) {
+    for (const [key, val] of Object.entries(msg.size)) {
       const nk = normalizeSizeKey(key);
       const n = Number(val);
-      if (nk && Number.isFinite(n) && n > 0) out[nk] = n;
+      if (nk && Number.isFinite(n) && n > 0) items.push({ size: nk, qty: n });
     }
-    return Object.keys(out).length ? out : null;
-  }
-  return null;
-}
-
-function normalizeState(raw) {
-  if (!raw || typeof raw !== "object") {
-    return null;
+  } else if (typeof msg.size === "string") {
+    const nk = normalizeSizeKey(msg.size);
+    if (nk) {
+      const q = msg.quantity != null && Number(msg.quantity) > 0 ? Number(msg.quantity) : 1;
+      items.push({ size: nk, qty: q });
+    }
   }
   return {
-    product: raw.product ?? null,
-    size: normalizeSizeField(raw.size, raw.quantity),
-    quantity: raw.quantity ?? null,
-    stage: raw.stage ?? "exploration",
+    product: msg.product ?? null,
+    items: sortItems(items),
+    stage: msg.stage ?? "exploration",
   };
+}
+
+function normalizeItemsArray(arr) {
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  for (const row of arr) {
+    const size = normalizeSizeKey(row?.size);
+    const qty = Number(row?.qty);
+    if (size && Number.isFinite(qty) && qty > 0) out.push({ size, qty });
+  }
+  return sortItems(mergeItems([], out));
+}
+
+function sortItems(items) {
+  const order = ["S", "M", "L", "XL"];
+  return [...items].sort((a, b) => order.indexOf(a.size) - order.indexOf(b.size));
+}
+
+export function mergeItems(existing, incoming) {
+  const map = new Map();
+  for (const it of existing || []) {
+    const size = normalizeSizeKey(it?.size);
+    const qty = Number(it?.qty);
+    if (size && Number.isFinite(qty) && qty > 0) {
+      map.set(size, (map.get(size) || 0) + qty);
+    }
+  }
+  for (const it of incoming || []) {
+    const size = normalizeSizeKey(it?.size);
+    const qty = Number(it?.qty);
+    if (size && Number.isFinite(qty) && qty > 0) {
+      map.set(size, (map.get(size) || 0) + qty);
+    }
+  }
+  return sortItems([...map.entries()].map(([size, qty]) => ({ size, qty })));
+}
+
+function rowFromItemsObject(obj, product, stage) {
+  const items = [];
+  for (const [key, val] of Object.entries(obj)) {
+    const nk = normalizeSizeKey(key);
+    const n = Number(val);
+    if (nk && Number.isFinite(n) && n > 0) items.push({ size: nk, qty: n });
+  }
+  if (!items.length) return null;
+  return {
+    product: product ?? null,
+    items: normalizeItemsArray(items),
+    stage: stage ?? "exploration",
+  };
+}
+
+function normalizeRow(data) {
+  if (!data || typeof data !== "object") return null;
+
+  if (Array.isArray(data.items)) {
+    return {
+      product: data.product ?? null,
+      items: normalizeItemsArray(data.items),
+      stage: data.stage ?? "exploration",
+    };
+  }
+
+  if (data.items != null && typeof data.items === "object" && !Array.isArray(data.items)) {
+    const mistaken = rowFromItemsObject(data.items, data.product, data.stage);
+    if (mistaken) return mistaken;
+  }
+
+  if (data.messages != null) {
+    return legacyFromMessages(data.messages);
+  }
+
+  return {
+    product: data.product ?? null,
+    items: [],
+    stage: data.stage ?? "exploration",
+  };
+}
+
+function rowForUpsert(state) {
+  const product = state?.product ?? null;
+  const items = normalizeItemsArray(state?.items);
+  const stage = state?.stage ?? "exploration";
+  return { product, items, stage };
 }
 
 export async function saveSession(sessionId, state) {
   const supabase = getSupabase();
-  const messages = normalizeState(state) ?? {
-    product: null,
-    size: null,
-    quantity: null,
-    stage: "exploration",
-  };
-  const { error } = await supabase
-    .from("sessions")
-    .upsert({ id: sessionId, messages, updated_at: new Date().toISOString() });
+  const row = rowForUpsert(state);
+  const { error } = await supabase.from("sessions").upsert({
+    id: sessionId,
+    product: row.product,
+    items: row.items,
+    stage: row.stage,
+    updated_at: new Date().toISOString(),
+  });
   if (error) throw error;
 }
 
@@ -56,9 +138,9 @@ export async function getSession(sessionId) {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("sessions")
-    .select("messages")
+    .select("product, items, stage, messages")
     .eq("id", sessionId)
     .maybeSingle();
   if (error) throw error;
-  return normalizeState(data?.messages ?? null);
+  return normalizeRow(data);
 }
