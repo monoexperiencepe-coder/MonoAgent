@@ -9,6 +9,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { generateResponse } from "./src/services/aiService.js";
 import { getSession, saveSession, mergeItems } from "./src/lib/sessions.js";
+import { httpErrorMessage, toError } from "./src/lib/errors.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -260,8 +261,16 @@ app.post("/chat", async (req, res) => {
     console.log("[SESSION] Sesión encontrada:", stored);
 
     const session = sessionFromStored(stored);
+    if (!Array.isArray(session.items)) session.items = [];
+    session.product = session.product ?? null;
+    session.stage = session.stage ?? "exploration";
+
+    console.log("INPUT:", trimmedMessage);
+    console.log("SESSION BEFORE:", { ...session, items: [...(session.items || [])] });
 
     updateSession(session, trimmedMessage);
+
+    console.log("SESSION AFTER:", { ...session, items: [...(session.items || [])] });
 
     const stateSnapshot = sessionStateForPrompt(session);
     console.log("[SESSION] Guardando sesión:", sessionId, stateSnapshot);
@@ -269,21 +278,30 @@ app.post("/chat", async (req, res) => {
       await saveSession(sessionId, stateSnapshot);
     } catch (error) {
       console.error("[SESSION] Error guardando:", error);
-      throw error;
+      throw toError(error);
     }
 
     const basePrompt = typeof systemPrompt === "string" ? systemPrompt : "";
     const augmentedSystem = [basePrompt, buildSessionSystemAugmentation(session)].filter(Boolean).join("\n\n");
 
-    const reply = await generateResponse(trimmedMessage, {
+    let reply = await generateResponse(trimmedMessage, {
       systemPrompt: augmentedSystem,
       faqs: Array.isArray(faqs) ? faqs : [],
     });
 
+    if (typeof reply !== "string") {
+      console.error("INVALID LLM REPLY:", reply);
+      reply = "";
+    }
+
     res.json({ reply, sessionId });
   } catch (err) {
-    console.error("[POST /chat] Error:", err?.message ?? err);
-    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    console.error("CHAT ERROR:", err);
+    console.error("STACK:", err?.stack);
+
+    return res.status(500).json({
+      error: httpErrorMessage(err),
+    });
   }
 });
 

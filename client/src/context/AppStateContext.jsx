@@ -101,13 +101,19 @@ export function AppStateProvider({ children }) {
           /* ignore */
         }
       }
-      setMessages((prev) => [...prev, { role: "assistant", text: reply || "" }]);
+      const assistantText = typeof reply === "string" ? reply : "";
+      if (typeof reply !== "string" && reply != null) {
+        console.error("[chat] reply inesperado:", reply);
+      }
+      setMessages((prev) => [...prev, { role: "assistant", text: assistantText }]);
     } catch (e) {
+      const errMsg =
+        e instanceof Error && typeof e.message === "string" ? e.message : "Error desconocido";
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          text: `Error: ${errMsg}`,
         },
       ]);
     } finally {

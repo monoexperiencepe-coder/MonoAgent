@@ -1,4 +1,5 @@
 import { getSupabase } from "./supabase.js";
+import { toError } from "./errors.js";
 
 const VALID_SIZES = new Set(["S", "M", "L", "XL"]);
 
@@ -131,7 +132,7 @@ export async function saveSession(sessionId, state) {
     stage: row.stage,
     updated_at: new Date().toISOString(),
   });
-  if (error) throw error;
+  if (error) throw toError(error);
 }
 
 export async function getSession(sessionId) {
@@ -141,6 +142,6 @@ export async function getSession(sessionId) {
     .select("product, items, stage, messages")
     .eq("id", sessionId)
     .maybeSingle();
-  if (error) throw error;
+  if (error) throw toError(error);
   return normalizeRow(data);
 }

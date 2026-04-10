@@ -1,6 +1,22 @@
 const BASE_URL =
   import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? "http://localhost:3000" : "");
 
+function errorTextFromResponseBody(data) {
+  if (!data) return "Error desconocido";
+
+  if (typeof data.error === "string") return data.error;
+
+  if (typeof data.error === "object" && data.error !== null) {
+    try {
+      return JSON.stringify(data.error);
+    } catch {
+      return "Error en el servidor";
+    }
+  }
+
+  return "Error en el servidor";
+}
+
 export async function sendChat({ message, sessionId, systemPrompt, faqs }) {
   console.log("[API] Enviando sessionId:", sessionId ?? "(no enviado)");
 
@@ -10,16 +26,20 @@ export async function sendChat({ message, sessionId, systemPrompt, faqs }) {
     body: JSON.stringify({ message, sessionId, systemPrompt, faqs }),
   });
 
-  let data = {};
+  let data = null;
   try {
     data = await res.json();
   } catch {
-    /* ignore */
+    data = null;
   }
 
   if (!res.ok) {
-    throw new Error(data.error || `Error ${res.status}`);
+    throw new Error(errorTextFromResponseBody(data));
   }
 
-  return data;
+  if (data != null && typeof data.reply !== "string" && data.reply != null) {
+    console.warn("[API] reply no es string:", data.reply);
+  }
+
+  return data ?? {};
 }
