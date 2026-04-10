@@ -11,6 +11,7 @@ import { sendChat } from "../services/api.js";
 const AppStateContext = createContext(null);
 
 const LS_INSTRUCTIONS = "agent_system_prompt";
+const LS_CHAT_SESSION = "agent_chat_session_id";
 
 function newFaqItem() {
   return { id: crypto.randomUUID(), question: "", answer: "" };
@@ -26,6 +27,13 @@ export function AppStateProvider({ children }) {
   const [saveFeedback, setSaveFeedback] = useState("");
 
   const [faqs, setFaqs] = useState([]);
+  const [chatSessionId, setChatSessionId] = useState(() => {
+    try {
+      return localStorage.getItem(LS_CHAT_SESSION) ?? "";
+    } catch {
+      return "";
+    }
+  });
 
   useEffect(() => {
     const saved = localStorage.getItem(LS_INSTRUCTIONS);
@@ -79,11 +87,20 @@ export function AppStateProvider({ children }) {
       }));
 
     try {
-      const { reply } = await sendChat({
+      const { reply, sessionId: nextSessionId } = await sendChat({
         message: text,
+        sessionId: chatSessionId || undefined,
         systemPrompt,
         faqs: payloadFaqs,
       });
+      if (nextSessionId && nextSessionId !== chatSessionId) {
+        setChatSessionId(nextSessionId);
+        try {
+          localStorage.setItem(LS_CHAT_SESSION, nextSessionId);
+        } catch {
+          /* ignore */
+        }
+      }
       setMessages((prev) => [...prev, { role: "assistant", text: reply || "" }]);
     } catch (e) {
       setMessages((prev) => [
@@ -96,7 +113,7 @@ export function AppStateProvider({ children }) {
     } finally {
       setIsTyping(false);
     }
-  }, [chatInput, faqs, isTyping, systemPrompt]);
+  }, [chatInput, chatSessionId, faqs, isTyping, systemPrompt]);
 
   const value = useMemo(
     () => ({
