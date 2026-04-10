@@ -93,6 +93,54 @@ function extractItems(message) {
     .sort((a, b) => order.indexOf(a.size) - order.indexOf(b.size));
 }
 
+/**
+ * Cantidad sin talla en el mismo mensaje (ej. "dame 3" tras haber dicho "talla m").
+ * Solo si extractItems no encontró líneas; no usar si ya hay talla en el texto.
+ */
+function extractOrphanQuantity(message) {
+  const s = String(message).trim().toLowerCase();
+  if (!s) return null;
+  const q = String.raw`(\d+|uno|dos|tres|cuatro|cinco|seis)`;
+  const verbRe = new RegExp(
+    String.raw`\b(?:dame|quiero|necesito|envíame|envia|mándame|mandame|pónme|ponme|deme)\s+${q}\b`
+  );
+  const m1 = s.match(verbRe);
+  if (m1) return parseQtyToken(m1[1]);
+  const sonRe = new RegExp(String.raw`^\s*son\s+${q}\s*[!?.]*\s*$`);
+  const m2 = s.match(sonRe);
+  if (m2) return parseQtyToken(m2[1]);
+  const soloRe = new RegExp(String.raw`^\s*${q}\s*[!?.]*\s*$`);
+  const m3 = s.match(soloRe);
+  if (m3) return parseQtyToken(m3[1]);
+  return null;
+}
+
+function normalizeSessionSizeToken(v) {
+  if (v == null || v === "") return null;
+  return normSizeToken(String(v));
+}
+
+/** Una sola talla implícita: sizeCandidates con un elemento, o un único size en items con qty > 0. */
+function uniqueImpliedSize(session) {
+  const c = session.sizeCandidates;
+  if (Array.isArray(c) && c.length === 1) {
+    const one = normalizeSessionSizeToken(c[0]);
+    if (one) return one;
+  }
+  const lines = (session.items || []).filter((i) => Number(i.qty) > 0);
+  const sizes = [...new Set(lines.map((i) => normalizeSessionSizeToken(i.size)).filter(Boolean))];
+  if (sizes.length === 1) return sizes[0];
+  return null;
+}
+
+/** Sustituye la cantidad de esa talla (no suma con la anterior). Otras líneas se conservan. */
+function replaceQtyForSingleSize(items, size, qty) {
+  const sz = normalizeSessionSizeToken(size);
+  if (!sz || qty == null || qty < 1) return mergeItems([], items || []);
+  const rest = (items || []).filter((i) => normalizeSessionSizeToken(i.size) !== sz);
+  return mergeItems([], [...rest, { size: sz, qty }]);
+}
+
 /** Indecisión entre tallas sin cantidades (ej. "m o l", "entre m y l"). Mínimo 2 tallas distintas. */
 function detectSizeCandidates(m) {
   const lower = String(m).trim().toLowerCase();
@@ -122,7 +170,13 @@ function detectSizeCandidates(m) {
 
 function sessionFromStored(stored) {
   if (!stored) {
-    return { product: null, items: [], sizeCandidates: [], stage: "exploration" };
+    return {
+      product: null,
+      items: [],
+      sizeCandidates: [],
+      stage: "exploration",
+      promoShown: false,
+    };
   }
   const raw = Array.isArray(stored.items)
     ? stored.items.map((i) => ({ size: i.size, qty: Number(i.qty) }))
@@ -130,11 +184,13 @@ function sessionFromStored(stored) {
   const items = mergeItems([], raw);
   const rawCand = stored.sizeCandidates ?? stored.size_candidates;
   const sizeCandidates = Array.isArray(rawCand) ? [...rawCand] : [];
+  const promoRaw = stored.promoShown ?? stored.promo_shown;
   return {
     product: stored.product ?? null,
     items,
     sizeCandidates,
     stage: stored.stage ?? "exploration",
+    promoShown: promoRaw === true || promoRaw === 1 || promoRaw === "true",
   };
 }
 
@@ -192,10 +248,20 @@ function updateSession(session, message) {
   if (incoming.length > 0) {
     session.items = mergeItems(session.items, incoming);
     session.sizeCandidates = [];
-  } else if (session.product && !hasLineItems(session)) {
-    const cand = detectSizeCandidates(m);
-    if (cand && cand.length >= 2) {
-      session.sizeCandidates = cand;
+  } else if (session.product) {
+    const orphan = extractOrphanQuantity(message);
+    if (orphan != null && orphan >= 1) {
+      const implied = uniqueImpliedSize(session);
+      if (implied) {
+        session.items = replaceQtyForSingleSize(session.items, implied, orphan);
+        session.sizeCandidates = [];
+      }
+    }
+    if (!hasLineItems(session)) {
+      const cand = detectSizeCandidates(m);
+      if (cand && cand.length >= 2) {
+        session.sizeCandidates = cand;
+      }
     }
   }
 
@@ -212,6 +278,7 @@ function sessionStateForPrompt(session) {
     items: session.items,
     sizeCandidates: Array.isArray(session.sizeCandidates) ? session.sizeCandidates : [],
     stage: session.stage,
+    promoShown: !!session.promoShown,
   };
 }
 
@@ -222,6 +289,15 @@ function buildSessionSystemAugmentation(session) {
     cand.length >= 2
       ? `El cliente está evaluando entre las tallas: ${cand.join(", ")} — ayúdalo a decidir, NO muestres el catálogo general`
       : "";
+  const hasSizeAndQty = hasLineItems(session);
+  const promoRules = session.promoShown
+    ? `PROMOS (promoShown=true):
+* PROHIBIDO mostrar el bloque completo de promos (listados, packs, tablas de precios promocionales, bienvenida comercial repetida)
+* Si el cliente no pide explícitamente precios o promos, no listes promos`
+    : "";
+  const priceRules = hasSizeAndQty
+    ? `PRECIOS: El cliente ya tiene talla y cantidad en items[] — puedes indicar precio total y desglose según tus instrucciones.`
+    : `PRECIOS: NO muestres precio total ni tablas de promos todavía — aún no hay talla y cantidad en items[]; pregunta solo lo que falte para completar el pedido.`;
   return `
 
 ESTADO ACTUAL DEL CLIENTE (JSON; items[] = una entrada por talla, sin colapsar):
@@ -232,14 +308,16 @@ ${lines}
 
 ${candLine ? `${candLine}\n` : ""}
 
+${promoRules ? `${promoRules}\n\n` : ""}${priceRules}
+
 PRODUCTO ÚNICO:
 * Solo vendemos el Oversize High Cotton Ultra Grueso 11/1 en negro
 * NUNCA ofrezcas otros productos ni otras líneas
 * NO repitas el nombre del producto en cada mensaje — el cliente ya sabe qué está comprando
 
 FLUJO DE CONVERSACIÓN:
-* Primera respuesta tuya en el hilo (bienvenida): preséntate brevemente, muestra promos completas una sola vez y pregunta por talla
-* A partir de tu segunda respuesta: NUNCA vuelvas a mostrar promos completas salvo que el cliente pregunte explícitamente por precios o promociones
+* Si promoShown es false en el JSON: primera respuesta puede ser bienvenida breve + promos completas una sola vez + pregunta por talla
+* Si promoShown es true en el JSON: NUNCA vuelvas a mostrar promos completas salvo que el cliente pregunte explícitamente por precios o promociones (refuerzo: ver bloque PROMOS arriba si aplica)
 * Una vez el cliente indica talla (o está clara en el estado): pregunta SOLO por cantidad
 * Una vez tienes talla y cantidad en items[]: di el precio total y avanza al cierre (datos de envío / confirmación)
 * NO repitas las promos en cada mensaje
@@ -273,7 +351,7 @@ REGLAS IMPORTANTES:
 
 COMPORTAMIENTO SEGÚN stage:
 
-* exploration: orienta a talla; promos completas solo en tu primera respuesta del hilo (ver FLUJO DE CONVERSACIÓN)
+* exploration: orienta a talla; promos completas solo si promoShown es false (ver FLUJO DE CONVERSACIÓN)
 * interest: responde de forma puntual; aún no hay líneas en items
 * intention: hay líneas en items; refuerza mínimo de unidades si aplica
 * closing: listo para pago; confirma producto, cada talla con su cantidad y precios según información definida
@@ -340,6 +418,7 @@ app.post("/chat", async (req, res) => {
     if (!Array.isArray(session.sizeCandidates)) session.sizeCandidates = [];
     session.product = session.product ?? null;
     session.stage = session.stage ?? "exploration";
+    session.promoShown = !!session.promoShown;
 
     console.log("INPUT:", trimmedMessage);
     console.log("SESSION BEFORE:", { ...session, items: [...(session.items || [])] });
@@ -347,15 +426,6 @@ app.post("/chat", async (req, res) => {
     updateSession(session, trimmedMessage);
 
     console.log("SESSION AFTER:", { ...session, items: [...(session.items || [])] });
-
-    const stateSnapshot = sessionStateForPrompt(session);
-    console.log("[SESSION] Guardando sesión:", sessionId, stateSnapshot);
-    try {
-      await saveSession(sessionId, stateSnapshot);
-    } catch (error) {
-      console.error("[SESSION] Error guardando:", error);
-      throw toError(error);
-    }
 
     const basePrompt = typeof systemPrompt === "string" ? systemPrompt : "";
     const augmentedSystem = [basePrompt, buildSessionSystemAugmentation(session)].filter(Boolean).join("\n\n");
@@ -368,6 +438,17 @@ app.post("/chat", async (req, res) => {
     if (typeof reply !== "string") {
       console.error("INVALID LLM REPLY:", reply);
       reply = "";
+    }
+
+    session.promoShown = true;
+
+    const stateSnapshot = sessionStateForPrompt(session);
+    console.log("[SESSION] Guardando sesión:", sessionId, stateSnapshot);
+    try {
+      await saveSession(sessionId, stateSnapshot);
+    } catch (error) {
+      console.error("[SESSION] Error guardando:", error);
+      throw toError(error);
     }
 
     res.json({ reply, sessionId });

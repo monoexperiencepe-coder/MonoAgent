@@ -19,6 +19,10 @@ function normalizeSizeCandidates(arr) {
   return [...seen].sort((a, b) => order.indexOf(a) - order.indexOf(b));
 }
 
+function normalizePromoShown(v) {
+  return v === true || v === 1 || v === "true";
+}
+
 function legacyFromMessages(msg) {
   if (!msg || typeof msg !== "object") return null;
   if (Array.isArray(msg.items)) {
@@ -26,6 +30,7 @@ function legacyFromMessages(msg) {
       product: msg.product ?? null,
       items: normalizeItemsArray(msg.items),
       sizeCandidates: normalizeSizeCandidates(msg.sizeCandidates),
+      promoShown: normalizePromoShown(msg.promoShown ?? msg.promo_shown),
       stage: msg.stage ?? "exploration",
     };
   }
@@ -47,6 +52,7 @@ function legacyFromMessages(msg) {
     product: msg.product ?? null,
     items: sortItems(items),
     sizeCandidates: normalizeSizeCandidates(msg.sizeCandidates),
+    promoShown: normalizePromoShown(msg.promoShown ?? msg.promo_shown),
     stage: msg.stage ?? "exploration",
   };
 }
@@ -98,6 +104,7 @@ function rowFromItemsObject(obj, product, stage) {
     product: product ?? null,
     items: normalizeItemsArray(items),
     sizeCandidates: [],
+    promoShown: false,
     stage: stage ?? "exploration",
   };
 }
@@ -110,13 +117,19 @@ function normalizeRow(data) {
       product: data.product ?? null,
       items: normalizeItemsArray(data.items),
       sizeCandidates: normalizeSizeCandidates(data.size_candidates ?? data.sizeCandidates),
+      promoShown: normalizePromoShown(data.promo_shown ?? data.promoShown),
       stage: data.stage ?? "exploration",
     };
   }
 
   if (data.items != null && typeof data.items === "object" && !Array.isArray(data.items)) {
     const mistaken = rowFromItemsObject(data.items, data.product, data.stage);
-    if (mistaken) return mistaken;
+    if (mistaken) {
+      return {
+        ...mistaken,
+        promoShown: normalizePromoShown(data.promo_shown ?? data.promoShown),
+      };
+    }
   }
 
   if (data.messages != null) {
@@ -127,6 +140,7 @@ function normalizeRow(data) {
     product: data.product ?? null,
     items: [],
     sizeCandidates: normalizeSizeCandidates(data.size_candidates ?? data.sizeCandidates),
+    promoShown: normalizePromoShown(data.promo_shown ?? data.promoShown),
     stage: data.stage ?? "exploration",
   };
 }
@@ -136,10 +150,16 @@ function rowForUpsert(state) {
   const items = normalizeItemsArray(state?.items);
   const stage = state?.stage ?? "exploration";
   const size_candidates = normalizeSizeCandidates(state?.sizeCandidates);
-  return { product, items, stage, size_candidates };
+  const promo_shown = normalizePromoShown(state?.promoShown);
+  return { product, items, stage, size_candidates, promo_shown };
 }
 
-/** Persiste `size_candidates` (jsonb). Si falta la columna: ALTER TABLE sessions ADD COLUMN IF NOT EXISTS size_candidates jsonb DEFAULT '[]'::jsonb; */
+/**
+ * Persiste `size_candidates` (jsonb) y `promo_shown` (bool).
+ * Si faltan columnas:
+ * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS size_candidates jsonb DEFAULT '[]'::jsonb;
+ * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS promo_shown boolean DEFAULT false;
+ */
 export async function saveSession(sessionId, state) {
   const supabase = getSupabase();
   const row = rowForUpsert(state);
@@ -149,6 +169,7 @@ export async function saveSession(sessionId, state) {
     items: row.items,
     stage: row.stage,
     size_candidates: row.size_candidates,
+    promo_shown: row.promo_shown,
     updated_at: new Date().toISOString(),
   });
   if (error) throw toError(error);
@@ -158,7 +179,7 @@ export async function getSession(sessionId) {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("sessions")
-    .select("product, items, stage, size_candidates, messages")
+    .select("product, items, stage, size_candidates, promo_shown, messages")
     .eq("id", sessionId)
     .maybeSingle();
   if (error) throw toError(error);
