@@ -4,6 +4,7 @@ dotenv.config();
 import express from "express";
 import cors from "cors";
 import { randomUUID } from "crypto";
+import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { generateResponse } from "./src/services/aiService.js";
@@ -115,6 +116,12 @@ app.use(
 );
 app.use(express.json());
 
+// Estáticos después del API. En Vercel el bundle suele no tener client/dist junto a __dirname;
+// includeFiles en vercel.json + process.cwd() asegura la ruta correcta.
+const distPath = existsSync(join(__dirname, "client/dist"))
+  ? join(__dirname, "client/dist")
+  : join(process.cwd(), "client/dist");
+
 app.post("/chat", async (req, res) => {
   const { message, sessionId: bodySessionId, systemPrompt, faqs } = req.body ?? {};
 
@@ -170,9 +177,9 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-app.use(express.static(join(__dirname, "client/dist")));
+app.use(express.static(distPath));
 app.get("/{*path}", (req, res) => {
-  res.sendFile(join(__dirname, "client/dist/index.html"));
+  res.sendFile(join(distPath, "index.html"));
 });
 
 export default app;
