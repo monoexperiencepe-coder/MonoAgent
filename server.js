@@ -14,24 +14,102 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 function sessionFromStored(stored) {
+  const size =
+    stored?.size && typeof stored.size === "object" && !Array.isArray(stored.size)
+      ? { ...stored.size }
+      : null;
   return {
     product: stored?.product ?? null,
-    size: stored?.size ?? null,
+    size: size && Object.keys(size).length ? size : null,
     quantity: stored?.quantity ?? null,
     stage: stored?.stage ?? "exploration",
   };
 }
 
-function sizeFromMessage(m) {
-  const map = { s: "S", m: "M", l: "L", xl: "XL" };
-  const phrase = m.match(/\btallas?\s*[:\s]*\b(s|m|l|xl)\b/);
-  if (phrase) return map[phrase[1]];
-  if (m in map) return map[m];
-  if (/\bxl\b/.test(m)) return "XL";
-  if (/\bl\b/.test(m)) return "L";
-  if (/\bm\b/.test(m)) return "M";
-  if (/\bs\b/.test(m)) return "S";
+const WORD_NUM = {
+  uno: 1,
+  dos: 2,
+  tres: 3,
+  cuatro: 4,
+  cinco: 5,
+  seis: 6,
+};
+
+function parseQtyToken(tok) {
+  if (/^\d+$/.test(tok)) return parseInt(tok, 10);
+  const w = WORD_NUM[tok.toLowerCase()];
+  return w ?? null;
+}
+
+function normSizeToken(tok) {
+  const t = tok.toLowerCase();
+  if (t === "xl") return "XL";
+  if (t === "s" || t === "m" || t === "l") return t.toUpperCase();
   return null;
+}
+
+/** Devuelve { S: n, M: n, ... } o null si no hay coincidencias en este mensaje. */
+function sizeFromMessage(m) {
+  const lower = String(m).trim().toLowerCase();
+  const out = {};
+  const qty = String.raw`(\d+|uno|dos|tres|cuatro|cinco|seis)`;
+  const sz = String.raw`(xl|s|m|l)`;
+
+  const reEnTalla = new RegExp(`${qty}\\s+en\\s+talla\\s+${sz}\\b`, "gi");
+  let ma;
+  while ((ma = reEnTalla.exec(lower)) !== null) {
+    const n = parseQtyToken(ma[1]);
+    const k = normSizeToken(ma[2]);
+    if (n != null && k) out[k] = (out[k] || 0) + n;
+  }
+
+  const reShort = new RegExp(`(^|\\s)${qty}\\s+${sz}(?=\\s|$|[,.]|\\s+y\\b)`, "gi");
+  while ((ma = reShort.exec(lower)) !== null) {
+    const n = parseQtyToken(ma[2]);
+    const k = normSizeToken(ma[3]);
+    if (n != null && k) out[k] = (out[k] || 0) + n;
+  }
+
+  if (Object.keys(out).length > 0) {
+    return out;
+  }
+
+  const phrase = lower.match(/\btallas?\s*[:\s]*\b(xl|s|m|l)\b/);
+  if (phrase) {
+    const k = normSizeToken(phrase[1]);
+    if (k) return { [k]: 1 };
+  }
+
+  if (lower === "s" || lower === "m" || lower === "l" || lower === "xl") {
+    const k = normSizeToken(lower);
+    if (k) return { [k]: 1 };
+  }
+
+  return null;
+}
+
+function hasPositiveSizeBreakdown(size) {
+  return (
+    size &&
+    typeof size === "object" &&
+    Object.values(size).some((n) => Number(n) > 0)
+  );
+}
+
+function formatSizeBreakdownLine(size) {
+  if (!hasPositiveSizeBreakdown(size)) {
+    return "no especificado";
+  }
+  const order = ["S", "M", "L", "XL"];
+  const entries = Object.entries(size)
+    .filter(([, n]) => Number(n) > 0)
+    .sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0]));
+  return entries
+    .map(([sz, n]) => {
+      const u = Number(n) === 1 ? "unidad" : "unidades";
+      return `${n} ${u} talla ${sz}`;
+    })
+    .join(", ");
 }
 
 function updateSession(session, message) {
@@ -41,9 +119,12 @@ function updateSession(session, message) {
     session.product = "high_cotton";
   }
 
-  const detectedSize = sizeFromMessage(m);
-  if (detectedSize) {
-    session.size = detectedSize;
+  const delta = sizeFromMessage(m);
+  if (delta && Object.keys(delta).length) {
+    session.size = { ...(session.size && typeof session.size === "object" ? session.size : {}), ...delta };
+  }
+  if (session.size && typeof session.size === "object" && !Object.keys(session.size).length) {
+    session.size = null;
   }
 
   if (/\bdame\s+2\b/.test(m) || /\bquiero\s+2\b/.test(m) || m === "2") {
@@ -52,9 +133,11 @@ function updateSession(session, message) {
     session.quantity = 3;
   }
 
-  if (session.product && session.size && session.quantity != null) {
+  const hasSizes = hasPositiveSizeBreakdown(session.size);
+
+  if (session.product && hasSizes) {
     session.stage = "closing";
-  } else if (session.product && session.size) {
+  } else if (session.product && session.quantity != null) {
     session.stage = "intention";
   } else if (session.product) {
     session.stage = "interest";
@@ -80,7 +163,7 @@ function buildSessionSystemAugmentation(session) {
 ESTADO ACTUAL DEL CLIENTE:
 ${JSON.stringify(sessionStateForPrompt(session))}
 
-El cliente ya eligió talla: ${session.size ?? "no especificada"}
+El cliente eligió: ${formatSizeBreakdownLine(session.size)}
 
 REGLAS IMPORTANTES:
 
