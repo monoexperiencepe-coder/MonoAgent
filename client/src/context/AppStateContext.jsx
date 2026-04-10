@@ -89,11 +89,11 @@ export function AppStateProvider({ children }) {
     try {
       const { reply, sessionId: nextSessionId } = await sendChat({
         message: text,
-        sessionId: chatSessionId || undefined,
+        sessionId: chatSessionId.trim() ? chatSessionId : undefined,
         systemPrompt,
         faqs: payloadFaqs,
       });
-      if (nextSessionId && nextSessionId !== chatSessionId) {
+      if (nextSessionId) {
         setChatSessionId(nextSessionId);
         try {
           localStorage.setItem(LS_CHAT_SESSION, nextSessionId);

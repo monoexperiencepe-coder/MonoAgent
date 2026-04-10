@@ -129,16 +129,31 @@ app.post("/chat", async (req, res) => {
   const trimmedMessage = String(message).trim();
 
   try {
+    console.log("[SESSION] body.sessionId recibido:", bodySessionId ?? "(undefined/null)");
+
     const sessionId =
       bodySessionId != null && String(bodySessionId).trim() !== ""
         ? String(bodySessionId).trim()
         : randomUUID();
 
+    console.log("[SESSION] sessionId resuelto (nuevo UUID si no venía en body):", sessionId);
+
+    console.log("[SESSION] Buscando sesión:", sessionId);
     const stored = await getSession(sessionId);
+    console.log("[SESSION] Sesión encontrada:", stored);
+
     const session = sessionFromStored(stored);
 
     updateSession(session, trimmedMessage);
-    await saveSession(sessionId, sessionStateForPrompt(session));
+
+    const messages = sessionStateForPrompt(session);
+    console.log("[SESSION] Guardando sesión:", sessionId, messages);
+    try {
+      await saveSession(sessionId, messages);
+    } catch (error) {
+      console.error("[SESSION] Error guardando:", error);
+      throw error;
+    }
 
     const basePrompt = typeof systemPrompt === "string" ? systemPrompt : "";
     const augmentedSystem = [basePrompt, buildSessionSystemAugmentation(session)].filter(Boolean).join("\n\n");
