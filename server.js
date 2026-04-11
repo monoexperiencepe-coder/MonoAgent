@@ -7,6 +7,7 @@ import { randomUUID } from "crypto";
 import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import twilio from "twilio";
 import { generateResponse } from "./src/services/aiService.js";
 import { getSession, saveSession, mergeItems } from "./src/lib/sessions.js";
 import { httpErrorMessage, toError } from "./src/lib/errors.js";
@@ -942,61 +943,67 @@ const distPath = existsSync(join(__dirname, "client/dist"))
 /** sessionId → buffer de mensajes cortos (<3 palabras) antes de procesar (debounce 2s). */
 const messageBuffers = new Map();
 
+/** Núcleo compartido entre /chat y /whatsapp (sesión, LLM, persistencia). */
+async function runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs }) {
+  console.log("[SESSION] Buscando sesión:", sessionId);
+  const stored = await getSession(sessionId);
+  console.log("[SESSION] Sesión encontrada:", stored);
+
+  const session = sessionFromStored(stored);
+  if (!Array.isArray(session.items)) session.items = [];
+  if (!Array.isArray(session.sizeCandidates)) session.sizeCandidates = [];
+  session.product = session.product ?? null;
+  session.stage = session.stage ?? "exploration";
+  session.promoShown = !!session.promoShown;
+  if (!session.customerData || typeof session.customerData !== "object") session.customerData = {};
+  session.recommendedSize =
+    session.recommendedSize != null && String(session.recommendedSize).trim() !== ""
+      ? normalizeSessionSizeToken(session.recommendedSize) || null
+      : null;
+
+  console.log("INPUT:", trimmedMessage);
+  console.log("SESSION BEFORE:", { ...session, items: [...(session.items || [])] });
+
+  updateSession(session, trimmedMessage);
+
+  console.log("SESSION AFTER:", { ...session, items: [...(session.items || [])] });
+
+  const basePrompt = typeof systemPrompt === "string" ? systemPrompt : "";
+  const augmentedSystem = [basePrompt, buildSessionSystemAugmentation(session)].filter(Boolean).join("\n\n");
+
+  let reply = await generateResponse(trimmedMessage, {
+    systemPrompt: augmentedSystem,
+    faqs: Array.isArray(faqs) ? faqs : [],
+  });
+
+  if (typeof reply !== "string") {
+    console.error("INVALID LLM REPLY:", reply);
+    reply = "";
+  }
+
+  const detectedRec = extractRecommendedSizeFromReply(reply);
+  if (detectedRec) {
+    session.recommendedSize = detectedRec;
+  }
+
+  session.promoShown = true;
+
+  const stateSnapshot = sessionStateForPrompt(session);
+  console.log("[SESSION] Guardando sesión:", sessionId, stateSnapshot);
+  try {
+    await saveSession(sessionId, stateSnapshot);
+  } catch (error) {
+    console.error("[SESSION] Error guardando:", error);
+    throw toError(error);
+  }
+
+  return { reply, sessionId };
+}
+
 async function runChatHandler(res, { sessionId, trimmedMessage, systemPrompt, faqs }) {
   try {
-    console.log("[SESSION] Buscando sesión:", sessionId);
-    const stored = await getSession(sessionId);
-    console.log("[SESSION] Sesión encontrada:", stored);
-
-    const session = sessionFromStored(stored);
-    if (!Array.isArray(session.items)) session.items = [];
-    if (!Array.isArray(session.sizeCandidates)) session.sizeCandidates = [];
-    session.product = session.product ?? null;
-    session.stage = session.stage ?? "exploration";
-    session.promoShown = !!session.promoShown;
-    if (!session.customerData || typeof session.customerData !== "object") session.customerData = {};
-    session.recommendedSize =
-      session.recommendedSize != null && String(session.recommendedSize).trim() !== ""
-        ? normalizeSessionSizeToken(session.recommendedSize) || null
-        : null;
-
-    console.log("INPUT:", trimmedMessage);
-    console.log("SESSION BEFORE:", { ...session, items: [...(session.items || [])] });
-
-    updateSession(session, trimmedMessage);
-
-    console.log("SESSION AFTER:", { ...session, items: [...(session.items || [])] });
-
-    const basePrompt = typeof systemPrompt === "string" ? systemPrompt : "";
-    const augmentedSystem = [basePrompt, buildSessionSystemAugmentation(session)].filter(Boolean).join("\n\n");
-
-    let reply = await generateResponse(trimmedMessage, {
-      systemPrompt: augmentedSystem,
-      faqs: Array.isArray(faqs) ? faqs : [],
-    });
-
-    if (typeof reply !== "string") {
-      console.error("INVALID LLM REPLY:", reply);
-      reply = "";
-    }
-
-    const detectedRec = extractRecommendedSizeFromReply(reply);
-    if (detectedRec) {
-      session.recommendedSize = detectedRec;
-    }
-
-    session.promoShown = true;
-
-    const stateSnapshot = sessionStateForPrompt(session);
-    console.log("[SESSION] Guardando sesión:", sessionId, stateSnapshot);
-    try {
-      await saveSession(sessionId, stateSnapshot);
-    } catch (error) {
-      console.error("[SESSION] Error guardando:", error);
-      throw toError(error);
-    }
-
-    res.json({ reply, sessionId });
+    const { reply, sessionId: sid } = await runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs });
+    res.json({ reply, sessionId: sid });
   } catch (err) {
     console.error("CHAT ERROR:", err);
     console.error("STACK:", err?.stack);
@@ -1077,6 +1084,52 @@ app.post("/chat", async (req, res) => {
       }
     });
   }, 2000);
+});
+
+const twilioWebhookParser = express.urlencoded({ extended: false });
+
+app.post("/whatsapp", twilioWebhookParser, async (req, res) => {
+  const body = req.body?.Body;
+  const from = req.body?.From;
+
+  const sendTwiM = (text) => {
+    const twiml = new twilio.twiml.MessagingResponse();
+    twiml.message(text);
+    res.type("text/xml").send(twiml.toString());
+  };
+
+  try {
+    if (body == null || String(body).trim() === "") {
+      sendTwiM("No recibimos el mensaje. Intenta de nuevo.");
+      return;
+    }
+    if (from == null || String(from).trim() === "") {
+      sendTwiM("No pudimos identificar tu número.");
+      return;
+    }
+
+    const sessionId = String(from).trim();
+    const trimmedMessage = String(body).trim();
+
+    const { reply } = await runChatCore({
+      sessionId,
+      trimmedMessage,
+      systemPrompt: "",
+      faqs: undefined,
+    });
+
+    const twiml = new twilio.twiml.MessagingResponse();
+    twiml.message(reply || "");
+    res.type("text/xml").send(twiml.toString());
+  } catch (err) {
+    console.error("WHATSAPP WEBHOOK ERROR:", err);
+    console.error("STACK:", err?.stack);
+    if (!res.headersSent) {
+      const twiml = new twilio.twiml.MessagingResponse();
+      twiml.message("Lo siento, hubo un error. Intenta en un momento.");
+      res.type("text/xml").send(twiml.toString());
+    }
+  }
 });
 
 app.use(express.static(distPath));
