@@ -324,6 +324,130 @@ function mergeCustomerData(prev, patch) {
   return base;
 }
 
+function normalizeForCityLookup(s) {
+  return trimStr(s)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+/** Clave ASCII minúscula → etiqueta para customerData.city */
+const PE_DESTINATION_LABEL = new Map([
+  ["lima", "Lima"],
+  ["cusco", "Cusco"],
+  ["cuzco", "Cusco"],
+  ["arequipa", "Arequipa"],
+  ["trujillo", "Trujillo"],
+  ["piura", "Piura"],
+  ["ica", "Ica"],
+  ["puno", "Puno"],
+  ["tacna", "Tacna"],
+  ["huancayo", "Huancayo"],
+  ["chiclayo", "Chiclayo"],
+  ["iquitos", "Iquitos"],
+  ["ayacucho", "Ayacucho"],
+  ["huaraz", "Huaraz"],
+  ["cajamarca", "Cajamarca"],
+  ["tarapoto", "Tarapoto"],
+  ["pucallpa", "Pucallpa"],
+  ["tumbes", "Tumbes"],
+  ["moquegua", "Moquegua"],
+  ["pasco", "Pasco"],
+  ["callao", "Callao"],
+  ["lambayeque", "Lambayeque"],
+  ["chimbote", "Chimbote"],
+  ["juliaca", "Juliaca"],
+  ["sullana", "Sullana"],
+  ["talara", "Talara"],
+  ["abancay", "Abancay"],
+  ["huancavelica", "Huancavelica"],
+  ["tingo maria", "Tingo María"],
+  ["puerto maldonado", "Puerto Maldonado"],
+  ["la libertad", "La Libertad"],
+  ["san martin", "San Martín"],
+  ["madre de dios", "Madre de Dios"],
+  ["surco", "Surco"],
+  ["santiago de surco", "Santiago de Surco"],
+  ["miraflores", "Miraflores"],
+  ["san isidro", "San Isidro"],
+  ["barranco", "Barranco"],
+  ["la molina", "La Molina"],
+  ["los olivos", "Los Olivos"],
+  ["jesus maria", "Jesús María"],
+  ["san borja", "San Borja"],
+  ["san miguel", "San Miguel"],
+  ["magdalena", "Magdalena"],
+  ["pueblo libre", "Pueblo Libre"],
+  ["chorrillos", "Chorrillos"],
+  ["rimac", "Rímac"],
+  ["comas", "Comas"],
+  ["independencia", "Independencia"],
+  ["ate", "Ate"],
+  ["vitarte", "Vitarte"],
+  ["sjl", "San Juan de Lurigancho"],
+  ["sjm", "San Juan de Miraflores"],
+  ["san juan de lurigancho", "San Juan de Lurigancho"],
+  ["san juan de miraflores", "San Juan de Miraflores"],
+  ["santa anita", "Santa Anita"],
+  ["lince", "Lince"],
+  ["san luis", "San Luis"],
+  ["villa maria del triunfo", "Villa María del Triunfo"],
+  ["villa el salvador", "Villa El Salvador"],
+  ["carabayllo", "Carabayllo"],
+  ["puente piedra", "Puente Piedra"],
+  ["ancon", "Ancón"],
+  ["chaclacayo", "Chaclacayo"],
+  ["cieneguilla", "Cieneguilla"],
+  ["lurin", "Lurín"],
+  ["pachacamac", "Pachacamac"],
+]);
+
+const NOT_STANDALONE_CITY = new Set([
+  "dame",
+  "quiero",
+  "son",
+  "talla",
+  "hola",
+  "gracias",
+  "ok",
+  "si",
+  "yes",
+  "no",
+  "buenos",
+  "dias",
+  "tres",
+  "dos",
+  "uno",
+  "cuatro",
+  "cinco",
+  "seis",
+  "polo",
+  "polos",
+  "envio",
+  "envío",
+  "pago",
+  "yape",
+  "efectivo",
+]);
+
+/**
+ * Ciudad o distrito (Lima) cuando el cliente responde solo con el nombre, p. ej. "cusco", "surco".
+ */
+function extractPlainDestinationCity(raw, patch) {
+  if (patch.city) return;
+  if (!raw || /\d/.test(raw)) return;
+  const words = trimStr(raw).split(/\s+/).filter(Boolean);
+  if (words.length < 1 || words.length > 3) return;
+  const key = normalizeForCityLookup(raw);
+  if (!key || NOT_STANDALONE_CITY.has(key)) return;
+  if (/\b(?:talla|dame|quiero|son|necesito|pack|polo)\b/i.test(raw)) return;
+  if (/\b(?:xl|s|m|l)\b/i.test(key) && /\b(?:y|en|talla)\b/.test(key)) return;
+  const label = PE_DESTINATION_LABEL.get(key);
+  if (label) {
+    patch.city = label;
+  }
+}
+
 /**
  * Extrae fragmentos de datos del cliente; se fusiona en varios mensajes seguidos.
  * Usa el texto original (mayúsculas) para nombres y direcciones.
@@ -410,6 +534,8 @@ function extractCustomerDataPatch(message) {
     }
   }
 
+  extractPlainDestinationCity(raw, patch);
+
   const badNames = /^(uno|dos|tres|cuatro|cinco|seis|s|m|l|xl)$/i;
   if (patch.name && badNames.test(patch.name)) delete patch.name;
 
@@ -424,8 +550,11 @@ function formatCustomerDataBlock(cd) {
   if (cd.address) parts.push(`Dirección: ${cd.address}`);
   if (cd.city) parts.push(`Ciudad: ${cd.city}`);
   if (!parts.length) return "";
+  const cityNote = cd.city
+    ? `\n\nCiudad/destino ya confirmado: ${cd.city} — NO volver a preguntar por ciudad o departamento de destino`
+    : "";
   return `DATOS DEL CLIENTE YA CONFIRMADOS (no volver a pedir de nuevo lo que ya aparece abajo):
-${parts.join("\n")}`;
+${parts.join("\n")}${cityNote}`;
 }
 
 function recomputeStage(session) {
