@@ -55,6 +55,48 @@ const REPLACE_KEYWORDS = [
   "mejor quiero",
 ];
 
+function messageWordCount(s) {
+  return trimStr(s).split(/\s+/).filter(Boolean).length;
+}
+
+function stripAccentsAscii(s) {
+  return String(s)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+/** Solo intención de pedir, sin número ni talla (p. ej. "dame", "quiero"). */
+const INCOMPLETE_INTENT_WORDS = new Set([
+  "dame",
+  "quiero",
+  "ponme",
+  "separa",
+  "separame",
+  "separamos",
+  "aparta",
+  "apartame",
+  "reserva",
+  "guarda",
+]);
+
+function isIncompleteOrderIntentOnly(message) {
+  const raw = trimStr(message);
+  if (!raw || /\d/.test(raw)) return false;
+  const norm = stripAccentsAscii(raw);
+  if (/\b(xl|s|m|l)\b/.test(norm)) return false;
+  const words = norm.split(/\s+/).filter(Boolean);
+  if (words.length === 0 || words.length > 2) return false;
+  return words.every((w) => INCOMPLETE_INTENT_WORDS.has(w));
+}
+
+function sessionHasTallaConfirmedForIncomplete(session) {
+  if (hasLineItems(session)) return true;
+  if (normalizeSessionSizeToken(session.recommendedSize)) return true;
+  const c = session.sizeCandidates;
+  return Array.isArray(c) && c.length === 1;
+}
+
 /**
  * Orden fijo; cada fase consume spans en `working` para evitar doble conteo.
  * 1) N en (talla)? talla
@@ -641,6 +683,16 @@ function updateSession(session, message) {
 
   session.items = mergeItems([], session.items);
 
+  session._incompleteOrderQtyHint = false;
+  const rawForHint = String(message).trim();
+  if (sessionHasTallaConfirmedForIncomplete(session) && isIncompleteOrderIntentOnly(rawForHint)) {
+    const incHint = extractItems(rawForHint);
+    const orbHint = extractOrphanQuantity(rawForHint);
+    if (incHint.length === 0 && orbHint == null) {
+      session._incompleteOrderQtyHint = true;
+    }
+  }
+
   if (!session.customerData || typeof session.customerData !== "object") {
     session.customerData = {};
   }
@@ -681,6 +733,10 @@ function buildSessionSystemAugmentation(session) {
   const recommendedLine =
     recSz && !hasLineItems(session)
       ? `Talla recomendada al cliente: ${recSz} — si el cliente confirma cantidad sin mencionar talla, usar esta talla al registrar items.`
+      : "";
+  const incompleteQtyHint =
+    session._incompleteOrderQtyHint === true
+      ? `INTENCIÓN DE PEDIDO SIN CANTIDAD: el cliente mandó solo "dame", "quiero", "ponme", "separa" (o similar) sin número ni talla nueva, y ya hay talla en contexto (items[] / recomendación / candidato único). NO reinicies el contexto ni vuelvas a presentar el producto. Responde muy breve con una sola pregunta, por ejemplo: "¿Dame cuántos? 😊" o "¿Cuántos te separo? 😊"`
       : "";
   const hasSizeAndQty = hasLineItems(session);
   const promoRules = session.promoShown
@@ -733,7 +789,7 @@ ${JSON.stringify(sessionStateForPrompt(session))}
 ${orderLock ? `${orderLock}\n\n` : ""}Desglose obligatorio (repite tal cual en confirmaciones; formato compacto tipo "2 M y 1 L"):
 ${lines}
 
-${custBlock ? `${custBlock}\n\n` : ""}${recommendedLine ? `${recommendedLine}\n\n` : ""}${candLine ? `${candLine}\n` : ""}
+${custBlock ? `${custBlock}\n\n` : ""}${incompleteQtyHint ? `${incompleteQtyHint}\n\n` : ""}${recommendedLine ? `${recommendedLine}\n\n` : ""}${candLine ? `${candLine}\n` : ""}
 
 ${promoRules ? `${promoRules}\n\n` : ""}${priceRules}
 
@@ -872,29 +928,11 @@ const distPath = existsSync(join(__dirname, "client/dist"))
   ? join(__dirname, "client/dist")
   : join(process.cwd(), "client/dist");
 
-app.post("/chat", async (req, res) => {
-  const { message, sessionId: bodySessionId, systemPrompt, faqs } = req.body ?? {};
+/** sessionId → buffer de mensajes cortos (<3 palabras) antes de procesar (debounce 2s). */
+const messageBuffers = new Map();
 
-  if (message === undefined || message === null || String(message).trim() === "") {
-    return res.status(400).json({ error: "message es requerido" });
-  }
-
-  if (faqs !== undefined && !Array.isArray(faqs)) {
-    return res.status(400).json({ error: "faqs debe ser un array" });
-  }
-
-  const trimmedMessage = String(message).trim();
-
+async function runChatHandler(res, { sessionId, trimmedMessage, systemPrompt, faqs }) {
   try {
-    console.log("[SESSION] body.sessionId recibido:", bodySessionId ?? "(undefined/null)");
-
-    const sessionId =
-      bodySessionId != null && String(bodySessionId).trim() !== ""
-        ? String(bodySessionId).trim()
-        : randomUUID();
-
-    console.log("[SESSION] sessionId resuelto (nuevo UUID si no venía en body):", sessionId);
-
     console.log("[SESSION] Buscando sesión:", sessionId);
     const stored = await getSession(sessionId);
     console.log("[SESSION] Sesión encontrada:", stored);
@@ -951,11 +989,83 @@ app.post("/chat", async (req, res) => {
   } catch (err) {
     console.error("CHAT ERROR:", err);
     console.error("STACK:", err?.stack);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: httpErrorMessage(err),
+      });
+    }
+  }
+}
 
-    return res.status(500).json({
-      error: httpErrorMessage(err),
+app.post("/chat", async (req, res) => {
+  const { message, sessionId: bodySessionId, systemPrompt, faqs } = req.body ?? {};
+
+  if (message === undefined || message === null || String(message).trim() === "") {
+    return res.status(400).json({ error: "message es requerido" });
+  }
+
+  if (faqs !== undefined && !Array.isArray(faqs)) {
+    return res.status(400).json({ error: "faqs debe ser un array" });
+  }
+
+  let trimmedMessage = String(message).trim();
+
+  const sessionId =
+    bodySessionId != null && String(bodySessionId).trim() !== ""
+      ? String(bodySessionId).trim()
+      : randomUUID();
+
+  console.log("[SESSION] body.sessionId recibido:", bodySessionId ?? "(undefined/null)");
+  console.log("[SESSION] sessionId resuelto (nuevo UUID si no venía en body):", sessionId);
+
+  const wc = messageWordCount(trimmedMessage);
+  const pending = messageBuffers.get(sessionId);
+
+  if (wc >= 3) {
+    let msg = trimmedMessage;
+    if (pending) {
+      clearTimeout(pending.timer);
+      const prev = pending.parts.join(" ").trim();
+      messageBuffers.delete(sessionId);
+      if (prev) msg = `${prev} ${msg}`.trim();
+    }
+    return runChatHandler(res, { sessionId, trimmedMessage: msg, systemPrompt, faqs });
+  }
+
+  const existing = messageBuffers.get(sessionId);
+  if (existing) {
+    clearTimeout(existing.timer);
+    existing.parts.push(trimmedMessage);
+    existing.systemPrompt = systemPrompt;
+    existing.faqs = faqs;
+  } else {
+    messageBuffers.set(sessionId, {
+      parts: [trimmedMessage],
+      timer: null,
+      systemPrompt,
+      faqs,
     });
   }
+
+  const buf = messageBuffers.get(sessionId);
+  buf.timer = setTimeout(() => {
+    const entry = messageBuffers.get(sessionId);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    messageBuffers.delete(sessionId);
+    const combined = entry.parts.join(" ").trim();
+    runChatHandler(res, {
+      sessionId,
+      trimmedMessage: combined,
+      systemPrompt: entry.systemPrompt,
+      faqs: entry.faqs,
+    }).catch((err) => {
+      console.error("CHAT BUFFER ERROR:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: httpErrorMessage(err) });
+      }
+    });
+  }, 2000);
 });
 
 app.use(express.static(distPath));
