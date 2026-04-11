@@ -39,6 +39,22 @@ function normSizeToken(tok) {
 const QTY_WORD = String.raw`(\d+|uno|dos|tres|cuatro|cinco|seis)`;
 const SIZE_ALT = String.raw`(xl|s|m|l)`;
 
+/** Si el mensaje indica cambio de idea, vaciar items antes de aplicar extractItems (reemplazo total). */
+const REPLACE_KEYWORDS = [
+  "mejor",
+  "en realidad",
+  "cambia",
+  "modifica",
+  "quiero que sean",
+  "que sean mejor",
+  "no dame",
+  "no, dame",
+  "olvida",
+  "mejor ponme",
+  "mejor son",
+  "mejor quiero",
+];
+
 /**
  * Orden fijo; cada fase consume spans en `working` para evitar doble conteo.
  * 1) N en (talla)? talla
@@ -599,6 +615,10 @@ function updateSession(session, message) {
 
   const incoming = extractItems(message);
   if (incoming.length > 0) {
+    const isReplaceIntent = REPLACE_KEYWORDS.some((k) => m.includes(k));
+    if (isReplaceIntent) {
+      session.items = [];
+    }
     applyExtractedLineItems(session, incoming);
     session.sizeCandidates = [];
   } else if (session.product) {
@@ -664,9 +684,11 @@ function buildSessionSystemAugmentation(session) {
       : "";
   const hasSizeAndQty = hasLineItems(session);
   const promoRules = session.promoShown
-    ? `PROMOS (promoShown=true):
-* PROHIBIDO mostrar el bloque completo de promos (listados, packs, tablas de precios promocionales, bienvenida comercial repetida)
-* Si el cliente no pide explícitamente precios o promos, no listes promos`
+    ? `PROMOS (promoShown=true) — REGLA DURA:
+* Está ABSOLUTAMENTE PROHIBIDO mostrar el bloque de promos (listados tipo "2 x S/110", "3 x S/150", packs en formato lista, tablas de precios promocionales, bienvenida comercial repetida) en **cualquier** mensaje.
+* Si promoShown = true: **no escribas** "2 x S/110" ni "3 x S/150" ni ningún bloque de precios en formato lista de promos.
+* Solo menciona precio como **total del pedido** cuando el cliente ya tiene talla y cantidad en items[] confirmados — usa la fórmula / PRECIO VERIFICADO de abajo para ese total único, no listas de packs.
+* Si el cliente no pide explícitamente precios o promos, no listes promos ni packs.`
     : "";
   const priceRules = hasSizeAndQty
     ? `PRECIOS: El cliente ya tiene talla y cantidad en items[] — indica el total con la fórmula y la cifra verificada de abajo (misma lógica que calcPrice(N)).`
@@ -725,7 +747,7 @@ PRODUCTO ÚNICO:
 
 FLUJO DE CONVERSACIÓN:
 * Si promoShown es false en el JSON: primera respuesta puede ser bienvenida breve + promos completas una sola vez + pregunta por talla
-* Si promoShown es true en el JSON: NUNCA vuelvas a mostrar promos completas salvo que el cliente pregunte explícitamente por precios o promociones (refuerzo: ver bloque PROMOS arriba si aplica)
+* Si promoShown es true en el JSON: cero listas de promos / "2 x S/110" en el chat; solo total de pedido cuando items[] ya tiene talla+cantidad (ver PROMOS arriba)
 * Una vez el cliente indica talla (o está clara en el estado): pregunta SOLO por cantidad
 * Una vez tienes talla y cantidad en items[]: di el precio total y pide datos de envío; el pago lo defines en cierre según FLUJO DE PAGO (Lima vs provincia)
 * NO repitas las promos en cada mensaje
@@ -747,6 +769,7 @@ LIMA (incluye distritos de Lima Metropolitana; entrega local):
 * Cuando el cliente confirme su método de pago (Yape, efectivo, etc.) **sin** haber pedido antes el número de Yape, responde SOLO con este cierre (puedes adaptar mínimamente el tono, no añadas datos de pago):
   "Perfecto, hemos registrado tu pedido. Nos comunicaremos contigo para coordinar la entrega. ¡Gracias por tu compra! 🙌"
 * Si el cliente de Lima pregunta explícitamente por el número de Yape (ej.: "¿cuál es el número de Yape?", "¿a qué número te mando?" o similar): responde directo, sin rodeos: "Al 979 400 295 a nombre de Alejandro Aguilar 👌"
+* **Después de dar el número de Yape en Lima:** no repitas preguntas de si está "listo para pagar" u otras redundantes; cierra de forma breve, por ejemplo: "Perfecto, quedo atento 🙌"
 * Lima es contra entrega por defecto; si el cliente quiere pagar antes por Yape, dar el número sin problema cuando lo pida explícitamente (mismo número arriba).
 * NUNCA pidas comprobante ni captura de pago en Lima — es contra entrega; paga al recibir.
 
@@ -754,6 +777,7 @@ PROVINCIA (fuera de Lima Metropolitana):
 * Se coordina pago por adelantado y envío; no asumas contra entrega.
 * Si el cliente dice "por Yape", "pago por Yape", "te pago por yape" u otra intención de pagar por Yape **pero aún no confirma que va a pagar en ese momento**: **NO des el número de Yape de inmediato**. Primero confirma el monto del adelanto (usa el total S/ del bloque PRECIO VERIFICADO / calcPrice cuando ya hay pedido) con algo como: "Perfecto, el adelanto es S/[monto]. ¿Estás listo para realizar el pago ahora?"
 * El número de Yape **solo** después de que el cliente confirme que va a pagar ahora: "sí", "listo", "ya", "dale", "confirmo", "dame el número", "pásame el yape", "¿a qué número?", etc. Ahí sí envías el número (979 400 295 a nombre de Alejandro Aguilar, salvo que FAQs indiquen otro).
+* **Después de haber enviado el número de Yape en provincia** (el cliente ya pidió número o confirmó que paga): **NO** vuelvas a preguntar "¿Estás listo para realizar el pago ahora?" — ya es obvio que va a pagar. Cierra con el resumen del pedido y, por ejemplo: "Tu pedido sigue apartado: [resumen]. Quedo atento al comprobante 👀"
 * Si el cliente dice "ya pagué", "hice el pago", "ya te transferí", "listo el yape" o similar (pago ya hecho): **SÍ** pide la captura/comprobante para coordinar envío, con este tono (sustituye [ciudad] por customerData.city o el destino confirmado):
   "Perfecto 🙌 Por favor envíanos la captura del pago para coordinar el despacho a [ciudad]. Te confirmamos el código de seguimiento una vez verificado."
 * Puedes combinar con el cierre de agradecimiento cuando corresponda, sin contradecir el pedido de captura en provincia.
@@ -782,6 +806,7 @@ REGLAS IMPORTANTES:
 * Si el cliente ya eligió talla (hay líneas en items[] con cantidades por talla), NUNCA volver a preguntar por talla
 * Si session.product está definido, no presentes catálogo ni otras líneas (producto único; ver arriba)
 * Si hay cantidades en items[], no vuelvas a ofrecer bloques de promos salvo que pregunten explícitamente por precios (ver FLUJO DE CONVERSACIÓN)
+* Si promoShown es true: jamás listas tipo "2 x S/110"; solo total del pedido con items[] (ver PROMOS)
 * Cuando el cliente haga una pregunta fuera del flujo (envíos, pagos, colores), respóndela brevemente y RETOMA desde donde estaba la conversación con un resumen del pedido actual
 * Si ya hay talla+cantidad en items[] y la pregunta es neutral, usa el empujón del apartado EMPUJÓN DE CIERRE (puede sustituir o complementar el formato de retoma clásico)
 * Formato de retoma (si no aplicas el empujón largo): "Por cierto, tu pedido sigue apartado: [resumen] ¿Confirmamos?"
