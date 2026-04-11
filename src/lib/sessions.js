@@ -23,6 +23,18 @@ function normalizePromoShown(v) {
   return v === true || v === 1 || v === "true";
 }
 
+const CUSTOMER_KEYS = ["name", "dni", "address", "city"];
+
+function normalizeCustomerData(obj) {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
+  const out = {};
+  for (const k of CUSTOMER_KEYS) {
+    const v = obj[k];
+    if (v != null && String(v).trim() !== "") out[k] = String(v).trim().slice(0, 500);
+  }
+  return out;
+}
+
 function legacyFromMessages(msg) {
   if (!msg || typeof msg !== "object") return null;
   if (Array.isArray(msg.items)) {
@@ -31,6 +43,7 @@ function legacyFromMessages(msg) {
       items: normalizeItemsArray(msg.items),
       sizeCandidates: normalizeSizeCandidates(msg.sizeCandidates),
       promoShown: normalizePromoShown(msg.promoShown ?? msg.promo_shown),
+      customerData: normalizeCustomerData(msg.customerData ?? msg.customer_data),
       stage: msg.stage ?? "exploration",
     };
   }
@@ -53,6 +66,7 @@ function legacyFromMessages(msg) {
     items: sortItems(items),
     sizeCandidates: normalizeSizeCandidates(msg.sizeCandidates),
     promoShown: normalizePromoShown(msg.promoShown ?? msg.promo_shown),
+    customerData: normalizeCustomerData(msg.customerData ?? msg.customer_data),
     stage: msg.stage ?? "exploration",
   };
 }
@@ -105,6 +119,7 @@ function rowFromItemsObject(obj, product, stage) {
     items: normalizeItemsArray(items),
     sizeCandidates: [],
     promoShown: false,
+    customerData: {},
     stage: stage ?? "exploration",
   };
 }
@@ -118,6 +133,7 @@ function normalizeRow(data) {
       items: normalizeItemsArray(data.items),
       sizeCandidates: normalizeSizeCandidates(data.size_candidates ?? data.sizeCandidates),
       promoShown: normalizePromoShown(data.promo_shown ?? data.promoShown),
+      customerData: normalizeCustomerData(data.customer_data ?? data.customerData),
       stage: data.stage ?? "exploration",
     };
   }
@@ -128,6 +144,7 @@ function normalizeRow(data) {
       return {
         ...mistaken,
         promoShown: normalizePromoShown(data.promo_shown ?? data.promoShown),
+        customerData: normalizeCustomerData(data.customer_data ?? data.customerData),
       };
     }
   }
@@ -141,6 +158,7 @@ function normalizeRow(data) {
     items: [],
     sizeCandidates: normalizeSizeCandidates(data.size_candidates ?? data.sizeCandidates),
     promoShown: normalizePromoShown(data.promo_shown ?? data.promoShown),
+    customerData: normalizeCustomerData(data.customer_data ?? data.customerData),
     stage: data.stage ?? "exploration",
   };
 }
@@ -151,14 +169,16 @@ function rowForUpsert(state) {
   const stage = state?.stage ?? "exploration";
   const size_candidates = normalizeSizeCandidates(state?.sizeCandidates);
   const promo_shown = normalizePromoShown(state?.promoShown);
-  return { product, items, stage, size_candidates, promo_shown };
+  const customer_data = normalizeCustomerData(state?.customerData);
+  return { product, items, stage, size_candidates, promo_shown, customer_data };
 }
 
 /**
- * Persiste `size_candidates` (jsonb) y `promo_shown` (bool).
+ * Persiste `size_candidates` (jsonb), `promo_shown` (bool), `customer_data` (jsonb).
  * Si faltan columnas:
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS size_candidates jsonb DEFAULT '[]'::jsonb;
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS promo_shown boolean DEFAULT false;
+ * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS customer_data jsonb DEFAULT '{}'::jsonb;
  */
 export async function saveSession(sessionId, state) {
   const supabase = getSupabase();
@@ -170,6 +190,7 @@ export async function saveSession(sessionId, state) {
     stage: row.stage,
     size_candidates: row.size_candidates,
     promo_shown: row.promo_shown,
+    customer_data: row.customer_data,
     updated_at: new Date().toISOString(),
   });
   if (error) throw toError(error);
@@ -179,7 +200,7 @@ export async function getSession(sessionId) {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("sessions")
-    .select("product, items, stage, size_candidates, promo_shown, messages")
+    .select("product, items, stage, size_candidates, promo_shown, customer_data, messages")
     .eq("id", sessionId)
     .maybeSingle();
   if (error) throw toError(error);

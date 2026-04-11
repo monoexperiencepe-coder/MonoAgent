@@ -176,6 +176,7 @@ function sessionFromStored(stored) {
       sizeCandidates: [],
       stage: "exploration",
       promoShown: false,
+      customerData: {},
     };
   }
   const raw = Array.isArray(stored.items)
@@ -185,12 +186,16 @@ function sessionFromStored(stored) {
   const rawCand = stored.sizeCandidates ?? stored.size_candidates;
   const sizeCandidates = Array.isArray(rawCand) ? [...rawCand] : [];
   const promoRaw = stored.promoShown ?? stored.promo_shown;
+  const rawCust = stored.customerData ?? stored.customer_data;
+  const customerData =
+    rawCust && typeof rawCust === "object" && !Array.isArray(rawCust) ? { ...rawCust } : {};
   return {
     product: stored.product ?? null,
     items,
     sizeCandidates,
     stage: stored.stage ?? "exploration",
     promoShown: promoRaw === true || promoRaw === 1 || promoRaw === "true",
+    customerData,
   };
 }
 
@@ -212,6 +217,144 @@ function formatItemsHuman(items) {
     .filter((i) => Number(i.qty) > 0)
     .sort((a, b) => order.indexOf(a.size) - order.indexOf(b.size));
   return rows.map((i) => `${i.qty} ${i.size}`).join(" y ");
+}
+
+/** Desglose línea por línea para el prompt (anti-confusión 2M+1L vs 3M). */
+function formatOrderLockBlock(session) {
+  const merged = mergeItems([], session.items || []);
+  const rows = merged.filter((i) => Number(i.qty) > 0);
+  if (!rows.length) return "";
+  const order = ["S", "M", "L", "XL"];
+  rows.sort((a, b) => order.indexOf(a.size) - order.indexOf(b.size));
+  const lines = rows.map((i) => {
+    const n = Number(i.qty);
+    const unit = n === 1 ? "unidad" : "unidades";
+    return `- ${n} ${unit} talla ${i.size}`;
+  });
+  const total = rows.reduce((s, i) => s + Number(i.qty), 0);
+  const poloWord = total === 1 ? "polo" : "polos";
+  return `PEDIDO CONFIRMADO POR EL CLIENTE (no cambiar):
+${lines.join("\n")}
+- Total: ${total} ${poloWord}
+PROHIBIDO cambiar estas cantidades ni estas tallas. En confirmaciones y resúmenes usa EXACTAMENTE este desglose; no agrupes tallas distintas en una sola ni inventes otras cifras.`;
+}
+
+function trimStr(s) {
+  if (s == null) return "";
+  return String(s).replace(/\s+/g, " ").trim();
+}
+
+function mergeCustomerData(prev, patch) {
+  const base = prev && typeof prev === "object" ? { ...prev } : {};
+  for (const k of ["name", "dni", "address", "city"]) {
+    const v = patch[k];
+    if (v != null && trimStr(v) !== "") base[k] = trimStr(v);
+  }
+  return base;
+}
+
+/**
+ * Extrae fragmentos de datos del cliente; se fusiona en varios mensajes seguidos.
+ * Usa el texto original (mayúsculas) para nombres y direcciones.
+ */
+function extractCustomerDataPatch(message) {
+  const raw = trimStr(message);
+  const patch = {};
+  if (!raw) return patch;
+
+  const dniM = raw.match(/\b(\d{8})\b/);
+  if (dniM) patch.dni = dniM[1];
+
+  const nameIntro = raw.match(
+    /(?:^|[.!?]\s*|\n)(?:me\s+llamo|soy|mi\s+nombre\s+es|nombre\s*:)\s+([A-Za-zÁÉÍÓÚÑáéíóúñ]+(?:\s+[A-Za-zÁÉÍÓÚÑáéíóúñ'.-]+){0,4})/i
+  );
+  if (nameIntro) patch.name = trimStr(nameIntro[1]);
+
+  const addrKw = raw.match(
+    /(?:direcci[oó]n\s*:?|vivo\s+en|env[íi]o\s+a|envio\s+a|mi\s+direcci[oó]n\s+es|mando\s+a|quedo\s+en|estoy\s+en)\s+([^\n]+?)(?=\s*(?:,|;|\n|dni\b|celular)|$)/i
+  );
+  if (addrKw) {
+    let a = trimStr(addrKw[1]);
+    a = a.replace(/\s*dni\s*:?\s*\d{8}.*$/i, "").trim();
+    if (a) patch.address = a;
+  }
+
+  const cityM = raw.match(
+    /(?:ciudad|distrito)\s*:?\s*([A-Za-zÁÉÍÓÚÑáéíóúñ][A-Za-zÁÉÍÓÚÑáéíóúñ\s.]+?)(?=\s*[,.;\n]|$)/i
+  );
+  if (cityM) patch.city = trimStr(cityM[1]);
+
+  if (!patch.city) {
+    const tail = raw.match(/,\s*(Lima|Callao|Surco|Miraflores|San Isidro|Barranco|La Molina)\b/i);
+    if (tail) patch.city = trimStr(tail[1]);
+  }
+
+  const commaParts = raw.split(",").map((p) => trimStr(p)).filter(Boolean);
+  if (commaParts.length >= 2) {
+    for (const p of commaParts) {
+      if (/^\d{8}$/.test(p)) patch.dni = patch.dni || p;
+    }
+    if (!patch.name) {
+      const first = commaParts[0];
+      if (
+        /^[A-Za-zÁÉÍÓÚÑáéíóúñ]+(?:\s+[A-Za-zÁÉÍÓÚÑáéíóúñ'.-]+)+$/.test(first) &&
+        first.length <= 80 &&
+        !/\d/.test(first)
+      ) {
+        patch.name = first;
+      }
+    }
+    if (!patch.address) {
+      for (const p of commaParts) {
+        if (
+          /\b(?:xl|s|m|l)\b/i.test(p) &&
+          /\d/.test(p) &&
+          /\b(?:y|en|talla)\b/i.test(p.toLowerCase())
+        ) {
+          continue;
+        }
+        if (
+          /\d/.test(p) &&
+          /[A-Za-záéíóúñ]{2,}/i.test(p) &&
+          !/^\d{8}$/.test(p) &&
+          p !== patch.name &&
+          p !== patch.city
+        ) {
+          patch.address = p;
+          break;
+        }
+      }
+    }
+    if (!patch.city && commaParts.length >= 2) {
+      const last = commaParts[commaParts.length - 1];
+      if (
+        /^[A-Za-zÁÉÍÓÚÑáéíóúñ][A-Za-zÁÉÍÓÚÑáéíóúñ\s]*$/.test(last) &&
+        last.length < 50 &&
+        !/^\d{8}$/.test(last) &&
+        last !== patch.name &&
+        last !== patch.address
+      ) {
+        patch.city = last;
+      }
+    }
+  }
+
+  const badNames = /^(uno|dos|tres|cuatro|cinco|seis|s|m|l|xl)$/i;
+  if (patch.name && badNames.test(patch.name)) delete patch.name;
+
+  return patch;
+}
+
+function formatCustomerDataBlock(cd) {
+  if (!cd || typeof cd !== "object") return "";
+  const parts = [];
+  if (cd.name) parts.push(`Nombre: ${cd.name}`);
+  if (cd.dni) parts.push(`DNI: ${cd.dni}`);
+  if (cd.address) parts.push(`Dirección: ${cd.address}`);
+  if (cd.city) parts.push(`Ciudad: ${cd.city}`);
+  if (!parts.length) return "";
+  return `DATOS DEL CLIENTE YA CONFIRMADOS (no volver a pedir de nuevo lo que ya aparece abajo):
+${parts.join("\n")}`;
 }
 
 function recomputeStage(session) {
@@ -267,23 +410,35 @@ function updateSession(session, message) {
 
   session.items = mergeItems([], session.items);
 
+  if (!session.customerData || typeof session.customerData !== "object") {
+    session.customerData = {};
+  }
+  const custPatch = extractCustomerDataPatch(String(message).trim());
+  session.customerData = mergeCustomerData(session.customerData, custPatch);
+
   recomputeStage(session);
 
   console.log("[SESSION] Estado actualizado:", session);
 }
 
 function sessionStateForPrompt(session) {
+  const cd = session.customerData && typeof session.customerData === "object" ? session.customerData : {};
   return {
     product: session.product,
     items: session.items,
     sizeCandidates: Array.isArray(session.sizeCandidates) ? session.sizeCandidates : [],
     stage: session.stage,
     promoShown: !!session.promoShown,
+    customerData: { ...cd },
   };
 }
 
 function buildSessionSystemAugmentation(session) {
   const lines = formatItemsHuman(session.items);
+  const orderLock = hasLineItems(session) ? formatOrderLockBlock(session) : "";
+  const custBlock = formatCustomerDataBlock(
+    session.customerData && typeof session.customerData === "object" ? session.customerData : {}
+  );
   const cand = Array.isArray(session.sizeCandidates) ? session.sizeCandidates : [];
   const candLine =
     cand.length >= 2
@@ -303,10 +458,10 @@ function buildSessionSystemAugmentation(session) {
 ESTADO ACTUAL DEL CLIENTE (JSON; items[] = una entrada por talla, sin colapsar):
 ${JSON.stringify(sessionStateForPrompt(session))}
 
-Desglose obligatorio (repite tal cual en confirmaciones; formato compacto tipo "2 M y 1 L"):
+${orderLock ? `${orderLock}\n\n` : ""}Desglose obligatorio (repite tal cual en confirmaciones; formato compacto tipo "2 M y 1 L"):
 ${lines}
 
-${candLine ? `${candLine}\n` : ""}
+${custBlock ? `${custBlock}\n\n` : ""}${candLine ? `${candLine}\n` : ""}
 
 ${promoRules ? `${promoRules}\n\n` : ""}${priceRules}
 
@@ -348,6 +503,7 @@ REGLAS IMPORTANTES:
 * Cada elemento de items[] es independiente: nunca fusiones tallas ni redistribuyas cantidades entre tallas
 * Si stage = "intention", enfócate en completar unidades y cerrar
 * Si stage = "closing", confirma el pedido con el desglose por talla y pide datos para pago
+* Si customerData en el JSON ya tiene campos rellenos, NO vuelvas a pedir esos datos de envío; solo pregunta lo que falte
 
 COMPORTAMIENTO SEGÚN stage:
 
@@ -419,6 +575,7 @@ app.post("/chat", async (req, res) => {
     session.product = session.product ?? null;
     session.stage = session.stage ?? "exploration";
     session.promoShown = !!session.promoShown;
+    if (!session.customerData || typeof session.customerData !== "object") session.customerData = {};
 
     console.log("INPUT:", trimmedMessage);
     console.log("SESSION BEFORE:", { ...session, items: [...(session.items || [])] });
