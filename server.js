@@ -281,6 +281,16 @@ function totalItemQty(session) {
   }, 0);
 }
 
+/** Precio total en soles para N polos (N = suma de cantidades del pedido). */
+function calcPrice(n) {
+  const N = Number(n);
+  if (!Number.isFinite(N) || N < 1) return null;
+  if (N === 1) return 60;
+  if (N === 2) return 110;
+  if (N >= 3) return 150 + (N - 3) * 30;
+  return null;
+}
+
 function formatItemsHuman(items) {
   if (!Array.isArray(items) || !items.length) return "ninguna línea todavía";
   const order = ["S", "M", "L", "XL"];
@@ -659,25 +669,40 @@ function buildSessionSystemAugmentation(session) {
 * Si el cliente no pide explícitamente precios o promos, no listes promos`
     : "";
   const priceRules = hasSizeAndQty
-    ? `PRECIOS: El cliente ya tiene talla y cantidad en items[] — indica el total usando SOLO la tabla de packs de abajo (no inventes ni linealices por polo).`
+    ? `PRECIOS: El cliente ya tiene talla y cantidad en items[] — indica el total con la fórmula y la cifra verificada de abajo (misma lógica que calcPrice(N)).`
     : `PRECIOS: NO muestres precio total ni tablas de promos todavía — aún no hay talla y cantidad en items[]; pregunta solo lo que falte para completar el pedido.`;
-  const packPriceTable = `TABLA DE PRECIOS (soles, PACK por cantidad total de polos — suma todas las qty de items[]):
+  const totalN = hasSizeAndQty ? totalItemQty(session) : 0;
+  const verifiedTotal = hasSizeAndQty && totalN > 0 ? calcPrice(totalN) : null;
+  const priceVerifiedLine =
+    verifiedTotal != null
+      ? `PRECIO VERIFICADO PARA ESTE PEDIDO: N = ${totalN} polo(s) en total (suma de qty en items[]) → S/${verifiedTotal}. Di al cliente exactamente S/${verifiedTotal} como total; coincide con calcPrice(${totalN}).`
+      : "";
+  const packPriceTable = `TABLA DE PRECIOS (soles; N = cantidad total de polos = suma de todas las qty en items[]):
 
-| Polos (total) | Precio PACK |
-|---------------|-------------|
-| 1             | S/60        |
-| 2             | S/110       |
-| 3             | S/150       |
-| 4             | S/155       |
-| 5             | S/185       |
-| 6             | S/219.90    |
+| N polos | Precio total |
+|---------|----------------|
+| 1       | S/60           |
+| 2       | S/110          |
+| 3       | S/150          |
+| 4       | S/180          |
+| 5       | S/210          |
+| 6       | S/240          |
+| 7       | S/270          |
 
-REGLAS DE COBRANZA (obligatorias):
-* El precio es por el PACK COMPLETO de esa fila, no por polo individual. Ej.: 4 polos = S/155 exacto, NO S/150 + S/60 ni 4×60.
-* Cantidad total N = suma de todas las cantidades en items[] (todas las tallas). Una sola tarifa de la tabla para ese N cuando N está entre 1 y 6.
-* Packs mixtos (varias tallas): sigue siendo UN solo pedido; N es el total de unidades; aplica la fila de la tabla para ese N.
-* Si N está entre 1 y 6, usa exactamente la fila correspondiente.
-* Si N > 6, no hay fila en esta tabla: indica según FAQs o pide confirmación al equipo; **nunca** sumes precios de dos packs de la tabla (p. ej. NO pack de 3 + pack de 1).`;
+REGLA DE CÁLCULO (obligatoria):
+* N = 1 → S/60
+* N = 2 → S/110
+* N ≥ 3 → precio = 150 + (N − 3) × 30  (base del pack de 3 a S/150, más S/30 por cada polo adicional sobre los 3)
+
+EJEMPLOS EXPLÍCITOS:
+* 4 polos = S/150 + S/30 = S/180
+* 5 polos = S/150 + S/60 = S/210
+* 6 polos = S/150 + S/90 = S/240
+* 7 polos = S/150 + S/120 = S/270
+
+PROHIBIDO: usar S/155, S/185, S/219.90 u otras cifras antiguas — **no existen** en esta política.
+* Packs mixtos (varias tallas): un solo N (total de unidades), una sola aplicación de la fórmula; no sumes precios de “packs” distintos de forma incorrecta.
+* Para cualquier N ≥ 1 entero, el total es el resultado de la fórmula anterior (equivalente a calcPrice(N) en código).`;
   return `
 
 ESTADO ACTUAL DEL CLIENTE (JSON; items[] = una entrada por talla, sin colapsar):
@@ -692,6 +717,7 @@ ${promoRules ? `${promoRules}\n\n` : ""}${priceRules}
 
 ${packPriceTable}
 
+${priceVerifiedLine ? `${priceVerifiedLine}\n` : ""}
 PRODUCTO ÚNICO:
 * Solo vendemos el Oversize High Cotton Ultra Grueso 11/1 en negro
 * NUNCA ofrezcas otros productos ni otras líneas
