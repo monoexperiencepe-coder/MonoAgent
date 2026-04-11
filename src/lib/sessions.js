@@ -35,6 +35,11 @@ function normalizeCustomerData(obj) {
   return out;
 }
 
+function normalizeRecommendedSizeField(v) {
+  const k = normalizeSizeKey(String(v ?? "").trim());
+  return k || null;
+}
+
 function legacyFromMessages(msg) {
   if (!msg || typeof msg !== "object") return null;
   if (Array.isArray(msg.items)) {
@@ -44,6 +49,7 @@ function legacyFromMessages(msg) {
       sizeCandidates: normalizeSizeCandidates(msg.sizeCandidates),
       promoShown: normalizePromoShown(msg.promoShown ?? msg.promo_shown),
       customerData: normalizeCustomerData(msg.customerData ?? msg.customer_data),
+      recommendedSize: normalizeRecommendedSizeField(msg.recommendedSize ?? msg.recommended_size),
       stage: msg.stage ?? "exploration",
     };
   }
@@ -67,6 +73,7 @@ function legacyFromMessages(msg) {
     sizeCandidates: normalizeSizeCandidates(msg.sizeCandidates),
     promoShown: normalizePromoShown(msg.promoShown ?? msg.promo_shown),
     customerData: normalizeCustomerData(msg.customerData ?? msg.customer_data),
+    recommendedSize: normalizeRecommendedSizeField(msg.recommendedSize ?? msg.recommended_size),
     stage: msg.stage ?? "exploration",
   };
 }
@@ -120,6 +127,7 @@ function rowFromItemsObject(obj, product, stage) {
     sizeCandidates: [],
     promoShown: false,
     customerData: {},
+    recommendedSize: null,
     stage: stage ?? "exploration",
   };
 }
@@ -134,6 +142,7 @@ function normalizeRow(data) {
       sizeCandidates: normalizeSizeCandidates(data.size_candidates ?? data.sizeCandidates),
       promoShown: normalizePromoShown(data.promo_shown ?? data.promoShown),
       customerData: normalizeCustomerData(data.customer_data ?? data.customerData),
+      recommendedSize: normalizeRecommendedSizeField(data.recommended_size ?? data.recommendedSize),
       stage: data.stage ?? "exploration",
     };
   }
@@ -145,6 +154,7 @@ function normalizeRow(data) {
         ...mistaken,
         promoShown: normalizePromoShown(data.promo_shown ?? data.promoShown),
         customerData: normalizeCustomerData(data.customer_data ?? data.customerData),
+        recommendedSize: normalizeRecommendedSizeField(data.recommended_size ?? data.recommendedSize),
       };
     }
   }
@@ -159,6 +169,7 @@ function normalizeRow(data) {
     sizeCandidates: normalizeSizeCandidates(data.size_candidates ?? data.sizeCandidates),
     promoShown: normalizePromoShown(data.promo_shown ?? data.promoShown),
     customerData: normalizeCustomerData(data.customer_data ?? data.customerData),
+    recommendedSize: normalizeRecommendedSizeField(data.recommended_size ?? data.recommendedSize),
     stage: data.stage ?? "exploration",
   };
 }
@@ -170,15 +181,17 @@ function rowForUpsert(state) {
   const size_candidates = normalizeSizeCandidates(state?.sizeCandidates);
   const promo_shown = normalizePromoShown(state?.promoShown);
   const customer_data = normalizeCustomerData(state?.customerData);
-  return { product, items, stage, size_candidates, promo_shown, customer_data };
+  const recommended_size = normalizeRecommendedSizeField(state?.recommendedSize);
+  return { product, items, stage, size_candidates, promo_shown, customer_data, recommended_size };
 }
 
 /**
- * Persiste `size_candidates` (jsonb), `promo_shown` (bool), `customer_data` (jsonb).
+ * Persiste `size_candidates` (jsonb), `promo_shown` (bool), `customer_data` (jsonb), `recommended_size` (text).
  * Si faltan columnas:
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS size_candidates jsonb DEFAULT '[]'::jsonb;
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS promo_shown boolean DEFAULT false;
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS customer_data jsonb DEFAULT '{}'::jsonb;
+ * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS recommended_size text DEFAULT NULL;
  */
 export async function saveSession(sessionId, state) {
   const supabase = getSupabase();
@@ -191,6 +204,7 @@ export async function saveSession(sessionId, state) {
     size_candidates: row.size_candidates,
     promo_shown: row.promo_shown,
     customer_data: row.customer_data,
+    recommended_size: row.recommended_size,
     updated_at: new Date().toISOString(),
   });
   if (error) throw toError(error);
@@ -200,7 +214,7 @@ export async function getSession(sessionId) {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("sessions")
-    .select("product, items, stage, size_candidates, promo_shown, customer_data, messages")
+    .select("product, items, stage, size_candidates, promo_shown, customer_data, recommended_size, messages")
     .eq("id", sessionId)
     .maybeSingle();
   if (error) throw toError(error);

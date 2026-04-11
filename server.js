@@ -133,6 +133,43 @@ function uniqueImpliedSize(session) {
   return null;
 }
 
+/**
+ * Talla implícita para cantidad huérfana ("dame 3"): con carrito vacío prioriza
+ * session.recommendedSize (última recomendación del asistente); si no, sizeCandidates / items.
+ */
+function orphanImpliedSize(session) {
+  if (!hasLineItems(session)) {
+    const rec = normalizeSessionSizeToken(session.recommendedSize);
+    if (rec) return rec;
+  }
+  return uniqueImpliedSize(session);
+}
+
+/** Si el asistente menciona exactamente una talla como recomendación, devolverla; si no, null. */
+function extractRecommendedSizeFromReply(reply) {
+  const t = String(reply).toLowerCase();
+  const found = new Set();
+  const sz = String.raw`(xl|s|m|l)\b`;
+  const sources = [
+    String.raw`\btallas?\s+${sz}`,
+    String.raw`\buna\s+${sz}`,
+    String.raw`\bun\s+${sz}`,
+    String.raw`(?:te\s+recomiendo|recomiendo|te\s+qued[aá]|te\s+ir[ií]a)\s+(?:mejor\s+)?(?:la\s+|el\s+|talla\s+)?${sz}`,
+    String.raw`(?:perfecta|perfecto|ideal|mejor)\s+(?:ser[ií]a\s+)?(?:la\s+|el\s+|talla\s+)?${sz}`,
+    String.raw`(?:la\s+|el\s+|talla\s+)${sz}(?:\s+te\s+queda|\s+te\s+va|\s+es\s+tu\s+talla)`,
+  ];
+  for (const src of sources) {
+    const re = new RegExp(src, "gi");
+    let m;
+    while ((m = re.exec(t)) !== null) {
+      const k = normSizeToken(m[1]);
+      if (k) found.add(k);
+    }
+  }
+  if (found.size === 1) return [...found][0];
+  return null;
+}
+
 /** Sustituye la cantidad de esa talla (no suma con la anterior). Otras líneas se conservan. */
 function replaceQtyForSingleSize(items, size, qty) {
   const sz = normalizeSessionSizeToken(size);
@@ -150,6 +187,7 @@ function replaceQtyForSingleSize(items, size, qty) {
 function applyExtractedLineItems(session, incoming) {
   const cleaned = mergeItems([], incoming);
   if (!cleaned.length) return;
+  session.recommendedSize = null;
   if (cleaned.length >= 2) {
     session.items = cleaned;
     return;
@@ -206,6 +244,7 @@ function sessionFromStored(stored) {
       stage: "exploration",
       promoShown: false,
       customerData: {},
+      recommendedSize: null,
     };
   }
   const raw = Array.isArray(stored.items)
@@ -218,6 +257,8 @@ function sessionFromStored(stored) {
   const rawCust = stored.customerData ?? stored.customer_data;
   const customerData =
     rawCust && typeof rawCust === "object" && !Array.isArray(rawCust) ? { ...rawCust } : {};
+  const recRaw = stored.recommendedSize ?? stored.recommended_size;
+  const recommendedSize = normalizeSessionSizeToken(recRaw) || null;
   return {
     product: stored.product ?? null,
     items,
@@ -225,6 +266,7 @@ function sessionFromStored(stored) {
     stage: stored.stage ?? "exploration",
     promoShown: promoRaw === true || promoRaw === 1 || promoRaw === "true",
     customerData,
+    recommendedSize,
   };
 }
 
@@ -423,10 +465,11 @@ function updateSession(session, message) {
   } else if (session.product) {
     const orphan = extractOrphanQuantity(message);
     if (orphan != null && orphan >= 1) {
-      const implied = uniqueImpliedSize(session);
+      const implied = orphanImpliedSize(session);
       if (implied) {
         session.items = replaceQtyForSingleSize(session.items, implied, orphan);
         session.sizeCandidates = [];
+        session.recommendedSize = null;
       }
     }
     if (!hasLineItems(session)) {
@@ -452,6 +495,7 @@ function updateSession(session, message) {
 
 function sessionStateForPrompt(session) {
   const cd = session.customerData && typeof session.customerData === "object" ? session.customerData : {};
+  const rec = normalizeSessionSizeToken(session.recommendedSize) || null;
   return {
     product: session.product,
     items: session.items,
@@ -459,6 +503,7 @@ function sessionStateForPrompt(session) {
     stage: session.stage,
     promoShown: !!session.promoShown,
     customerData: { ...cd },
+    recommendedSize: rec,
   };
 }
 
@@ -472,6 +517,11 @@ function buildSessionSystemAugmentation(session) {
   const candLine =
     cand.length >= 2
       ? `El cliente está evaluando entre las tallas: ${cand.join(", ")} — ayúdalo a decidir, NO muestres el catálogo general`
+      : "";
+  const recSz = normalizeSessionSizeToken(session.recommendedSize);
+  const recommendedLine =
+    recSz && !hasLineItems(session)
+      ? `Talla recomendada al cliente: ${recSz} — si el cliente confirma cantidad sin mencionar talla, usar esta talla al registrar items.`
       : "";
   const hasSizeAndQty = hasLineItems(session);
   const promoRules = session.promoShown
@@ -507,7 +557,7 @@ ${JSON.stringify(sessionStateForPrompt(session))}
 ${orderLock ? `${orderLock}\n\n` : ""}Desglose obligatorio (repite tal cual en confirmaciones; formato compacto tipo "2 M y 1 L"):
 ${lines}
 
-${custBlock ? `${custBlock}\n\n` : ""}${candLine ? `${candLine}\n` : ""}
+${custBlock ? `${custBlock}\n\n` : ""}${recommendedLine ? `${recommendedLine}\n\n` : ""}${candLine ? `${candLine}\n` : ""}
 
 ${promoRules ? `${promoRules}\n\n` : ""}${priceRules}
 
@@ -645,6 +695,10 @@ app.post("/chat", async (req, res) => {
     session.stage = session.stage ?? "exploration";
     session.promoShown = !!session.promoShown;
     if (!session.customerData || typeof session.customerData !== "object") session.customerData = {};
+    session.recommendedSize =
+      session.recommendedSize != null && String(session.recommendedSize).trim() !== ""
+        ? normalizeSessionSizeToken(session.recommendedSize) || null
+        : null;
 
     console.log("INPUT:", trimmedMessage);
     console.log("SESSION BEFORE:", { ...session, items: [...(session.items || [])] });
@@ -664,6 +718,11 @@ app.post("/chat", async (req, res) => {
     if (typeof reply !== "string") {
       console.error("INVALID LLM REPLY:", reply);
       reply = "";
+    }
+
+    const detectedRec = extractRecommendedSizeFromReply(reply);
+    if (detectedRec) {
+      session.recommendedSize = detectedRec;
     }
 
     session.promoShown = true;
