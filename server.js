@@ -141,6 +141,35 @@ function replaceQtyForSingleSize(items, size, qty) {
   return mergeItems([], [...rest, { size: sz, qty }]);
 }
 
+/**
+ * Aplica líneas extraídas del mensaje: no sumar al carrito salvo "una talla nueva".
+ * - Varias tallas en un solo mensaje → reemplaza todo el pedido (ej. "2L y 1M" sustituye "3L").
+ * - Una sola talla que ya estaba en el carrito → sustituye solo esa línea (misma qty del mensaje, no acumulativa).
+ * - Una sola talla nueva → suma al carrito (merge).
+ */
+function applyExtractedLineItems(session, incoming) {
+  const cleaned = mergeItems([], incoming);
+  if (!cleaned.length) return;
+  if (cleaned.length >= 2) {
+    session.items = cleaned;
+    return;
+  }
+  const one = cleaned[0];
+  const sz = normalizeSessionSizeToken(one.size);
+  const qty = Number(one.qty);
+  if (!sz || !Number.isFinite(qty) || qty < 1) return;
+  const prevSizes = new Set(
+    (session.items || [])
+      .filter((i) => Number(i.qty) > 0)
+      .map((i) => normalizeSessionSizeToken(i.size))
+  );
+  if (!prevSizes.has(sz)) {
+    session.items = mergeItems(session.items, cleaned);
+  } else {
+    session.items = replaceQtyForSingleSize(session.items, sz, qty);
+  }
+}
+
 /** Indecisión entre tallas sin cantidades (ej. "m o l", "entre m y l"). Mínimo 2 tallas distintas. */
 function detectSizeCandidates(m) {
   const lower = String(m).trim().toLowerCase();
@@ -389,7 +418,7 @@ function updateSession(session, message) {
 
   const incoming = extractItems(message);
   if (incoming.length > 0) {
-    session.items = mergeItems(session.items, incoming);
+    applyExtractedLineItems(session, incoming);
     session.sizeCandidates = [];
   } else if (session.product) {
     const orphan = extractOrphanQuantity(message);
@@ -451,8 +480,25 @@ function buildSessionSystemAugmentation(session) {
 * Si el cliente no pide explícitamente precios o promos, no listes promos`
     : "";
   const priceRules = hasSizeAndQty
-    ? `PRECIOS: El cliente ya tiene talla y cantidad en items[] — puedes indicar precio total y desglose según tus instrucciones.`
+    ? `PRECIOS: El cliente ya tiene talla y cantidad en items[] — indica el total usando SOLO la tabla de packs de abajo (no inventes ni linealices por polo).`
     : `PRECIOS: NO muestres precio total ni tablas de promos todavía — aún no hay talla y cantidad en items[]; pregunta solo lo que falte para completar el pedido.`;
+  const packPriceTable = `TABLA DE PRECIOS (soles, PACK por cantidad total de polos — suma todas las qty de items[]):
+
+| Polos (total) | Precio PACK |
+|---------------|-------------|
+| 1             | S/60        |
+| 2             | S/110       |
+| 3             | S/150       |
+| 4             | S/155       |
+| 5             | S/185       |
+| 6             | S/219.90    |
+
+REGLAS DE COBRANZA (obligatorias):
+* El precio es por el PACK COMPLETO de esa fila, no por polo individual. Ej.: 4 polos = S/155 exacto, NO S/150 + S/60 ni 4×60.
+* Cantidad total N = suma de todas las cantidades en items[] (todas las tallas). Una sola tarifa de la tabla para ese N cuando N está entre 1 y 6.
+* Packs mixtos (varias tallas): sigue siendo UN solo pedido; N es el total de unidades; aplica la fila de la tabla para ese N.
+* Si N está entre 1 y 6, usa exactamente la fila correspondiente.
+* Si N > 6, no hay fila en esta tabla: indica según FAQs o pide confirmación al equipo; **nunca** sumes precios de dos packs de la tabla (p. ej. NO pack de 3 + pack de 1).`;
   return `
 
 ESTADO ACTUAL DEL CLIENTE (JSON; items[] = una entrada por talla, sin colapsar):
@@ -464,6 +510,8 @@ ${lines}
 ${custBlock ? `${custBlock}\n\n` : ""}${candLine ? `${candLine}\n` : ""}
 
 ${promoRules ? `${promoRules}\n\n` : ""}${priceRules}
+
+${packPriceTable}
 
 PRODUCTO ÚNICO:
 * Solo vendemos el Oversize High Cotton Ultra Grueso 11/1 en negro
