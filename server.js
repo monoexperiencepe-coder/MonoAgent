@@ -9,6 +9,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import twilio from "twilio";
 import { generateResponse } from "./src/services/aiService.js";
+import { getAgentConfig, saveAgentConfig } from "./src/lib/agentConfig.js";
 import { getSession, saveSession, mergeItems, setSessionPendingMessage } from "./src/lib/sessions.js";
 import { httpErrorMessage, toError } from "./src/lib/errors.js";
 
@@ -1028,11 +1029,10 @@ async function clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, 
  * Dentro de 5s: concatena y procesa junto; fuera de 5s: procesa el pendiente y luego el nuevo.
  */
 async function handleWhatsAppInbound(sessionId, trimmedMessage) {
+  const { systemPrompt, faqs } = await getAgentConfig();
   const stored = await getSession(sessionId);
   const pendingDb = stored?.pendingMessage ?? null;
   const wc = messageWordCount(trimmedMessage);
-  const systemPrompt = "";
-  const faqs = undefined;
 
   if (wc >= 3) {
     if (!pendingDb) {
@@ -1089,6 +1089,15 @@ app.post("/chat", async (req, res) => {
 
   if (faqs !== undefined && !Array.isArray(faqs)) {
     return res.status(400).json({ error: "faqs debe ser un array" });
+  }
+
+  try {
+    await saveAgentConfig({
+      ...(typeof systemPrompt === "string" ? { systemPrompt } : {}),
+      ...(faqs !== undefined ? { faqs } : {}),
+    });
+  } catch (err) {
+    console.error("[agent_config] guardar fallido:", err);
   }
 
   let trimmedMessage = String(message).trim();
