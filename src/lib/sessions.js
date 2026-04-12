@@ -40,6 +40,24 @@ function normalizeRecommendedSizeField(v) {
   return k || null;
 }
 
+/** Buffer WhatsApp (Twilio): { text, at } con `at` ISO; null si vacío o inválido. */
+function parsePendingMessage(raw) {
+  if (raw == null) return null;
+  let obj = raw;
+  if (typeof raw === "string") {
+    try {
+      obj = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+  if (typeof obj !== "object" || obj === null || Array.isArray(obj)) return null;
+  const text = obj.text != null ? String(obj.text).trim().slice(0, 4000) : "";
+  const at = obj.at != null ? String(obj.at).trim() : "";
+  if (!text || !at) return null;
+  return { text, at };
+}
+
 function legacyFromMessages(msg) {
   if (!msg || typeof msg !== "object") return null;
   if (Array.isArray(msg.items)) {
@@ -135,6 +153,8 @@ function rowFromItemsObject(obj, product, stage) {
 function normalizeRow(data) {
   if (!data || typeof data !== "object") return null;
 
+  const pendingMessage = parsePendingMessage(data.pending_message ?? data.pendingMessage);
+
   if (Array.isArray(data.items)) {
     return {
       product: data.product ?? null,
@@ -144,6 +164,7 @@ function normalizeRow(data) {
       customerData: normalizeCustomerData(data.customer_data ?? data.customerData),
       recommendedSize: normalizeRecommendedSizeField(data.recommended_size ?? data.recommendedSize),
       stage: data.stage ?? "exploration",
+      pendingMessage,
     };
   }
 
@@ -155,12 +176,14 @@ function normalizeRow(data) {
         promoShown: normalizePromoShown(data.promo_shown ?? data.promoShown),
         customerData: normalizeCustomerData(data.customer_data ?? data.customerData),
         recommendedSize: normalizeRecommendedSizeField(data.recommended_size ?? data.recommendedSize),
+        pendingMessage,
       };
     }
   }
 
   if (data.messages != null) {
-    return legacyFromMessages(data.messages);
+    const legacy = legacyFromMessages(data.messages);
+    if (legacy) return { ...legacy, pendingMessage };
   }
 
   return {
@@ -171,6 +194,7 @@ function normalizeRow(data) {
     customerData: normalizeCustomerData(data.customer_data ?? data.customerData),
     recommendedSize: normalizeRecommendedSizeField(data.recommended_size ?? data.recommendedSize),
     stage: data.stage ?? "exploration",
+    pendingMessage,
   };
 }
 
@@ -192,6 +216,7 @@ function rowForUpsert(state) {
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS promo_shown boolean DEFAULT false;
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS customer_data jsonb DEFAULT '{}'::jsonb;
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS recommended_size text DEFAULT NULL;
+ * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pending_message jsonb DEFAULT NULL;
  */
 export async function saveSession(sessionId, state) {
   const supabase = getSupabase();
@@ -214,9 +239,44 @@ export async function getSession(sessionId) {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("sessions")
-    .select("product, items, stage, size_candidates, promo_shown, customer_data, recommended_size, messages")
+    .select(
+      "product, items, stage, size_candidates, promo_shown, customer_data, recommended_size, messages, pending_message"
+    )
     .eq("id", sessionId)
     .maybeSingle();
   if (error) throw toError(error);
   return normalizeRow(data);
+}
+
+/**
+ * Solo actualiza `pending_message` (buffer corto WhatsApp). INSERT mínimo si no existe fila.
+ */
+export async function setSessionPendingMessage(sessionId, pendingMessage) {
+  const supabase = getSupabase();
+  const now = new Date().toISOString();
+  const { data: row, error: selErr } = await supabase.from("sessions").select("id").eq("id", sessionId).maybeSingle();
+  if (selErr) throw toError(selErr);
+
+  if (row) {
+    const { error } = await supabase
+      .from("sessions")
+      .update({ pending_message: pendingMessage, updated_at: now })
+      .eq("id", sessionId);
+    if (error) throw toError(error);
+    return;
+  }
+
+  const { error } = await supabase.from("sessions").insert({
+    id: sessionId,
+    product: null,
+    items: [],
+    stage: "exploration",
+    size_candidates: [],
+    promo_shown: false,
+    customer_data: {},
+    recommended_size: null,
+    pending_message: pendingMessage,
+    updated_at: now,
+  });
+  if (error) throw toError(error);
 }

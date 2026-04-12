@@ -9,7 +9,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import twilio from "twilio";
 import { generateResponse } from "./src/services/aiService.js";
-import { getSession, saveSession, mergeItems } from "./src/lib/sessions.js";
+import { getSession, saveSession, mergeItems, setSessionPendingMessage } from "./src/lib/sessions.js";
 import { httpErrorMessage, toError } from "./src/lib/errors.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1015,6 +1015,71 @@ async function runChatHandler(res, { sessionId, trimmedMessage, systemPrompt, fa
   }
 }
 
+/** Buffer corto WhatsApp vía Supabase (Twilio = un POST por mensaje; sin esperar en memoria). */
+const WHATSAPP_PENDING_TTL_MS = 5000;
+
+async function clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs) {
+  await setSessionPendingMessage(sessionId, null);
+  return runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs });
+}
+
+/**
+ * Mensajes con <3 palabras acumulan en `sessions.pending_message`.
+ * Dentro de 5s: concatena y procesa junto; fuera de 5s: procesa el pendiente y luego el nuevo.
+ */
+async function handleWhatsAppInbound(sessionId, trimmedMessage) {
+  const stored = await getSession(sessionId);
+  const pendingDb = stored?.pendingMessage ?? null;
+  const wc = messageWordCount(trimmedMessage);
+  const systemPrompt = "";
+  const faqs = undefined;
+
+  if (wc >= 3) {
+    if (!pendingDb) {
+      const { reply } = await clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs);
+      return { replies: [reply] };
+    }
+    const age = Date.now() - Date.parse(pendingDb.at);
+    const fresh = Number.isFinite(age) && age <= WHATSAPP_PENDING_TTL_MS;
+    if (fresh) {
+      const combined = `${pendingDb.text} ${trimmedMessage}`.trim();
+      const { reply } = await clearPendingThenRunChat(sessionId, combined, systemPrompt, faqs);
+      return { replies: [reply] };
+    }
+    const { reply: r1 } = await clearPendingThenRunChat(sessionId, pendingDb.text, systemPrompt, faqs);
+    const { reply: r2 } = await clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs);
+    return { replies: [r1, r2] };
+  }
+
+  if (!pendingDb) {
+    await setSessionPendingMessage(sessionId, {
+      text: trimmedMessage,
+      at: new Date().toISOString(),
+    });
+    return { emptyAck: true };
+  }
+
+  const age = Date.now() - Date.parse(pendingDb.at);
+  const fresh = Number.isFinite(age) && age <= WHATSAPP_PENDING_TTL_MS;
+  if (fresh) {
+    const combined = `${pendingDb.text} ${trimmedMessage}`.trim();
+    const { reply } = await clearPendingThenRunChat(sessionId, combined, systemPrompt, faqs);
+    return { replies: [reply] };
+  }
+
+  const { reply: r1 } = await clearPendingThenRunChat(sessionId, pendingDb.text, systemPrompt, faqs);
+  const wcNew = messageWordCount(trimmedMessage);
+  if (wcNew >= 3) {
+    const { reply: r2 } = await clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs);
+    return { replies: [r1, r2] };
+  }
+  await setSessionPendingMessage(sessionId, {
+    text: trimmedMessage,
+    at: new Date().toISOString(),
+  });
+  return { replies: [r1] };
+}
+
 app.post("/chat", async (req, res) => {
   const { message, sessionId: bodySessionId, systemPrompt, faqs } = req.body ?? {};
 
@@ -1111,15 +1176,15 @@ app.post("/whatsapp", twilioWebhookParser, async (req, res) => {
     const sessionId = String(from).trim();
     const trimmedMessage = String(body).trim();
 
-    const { reply } = await runChatCore({
-      sessionId,
-      trimmedMessage,
-      systemPrompt: "",
-      faqs: undefined,
-    });
-
+    const result = await handleWhatsAppInbound(sessionId, trimmedMessage);
     const twiml = new twilio.twiml.MessagingResponse();
-    twiml.message(reply || "");
+    if (result.emptyAck) {
+      res.type("text/xml").send(twiml.toString());
+      return;
+    }
+    for (const r of result.replies || []) {
+      if (r != null && String(r).trim() !== "") twiml.message(String(r));
+    }
     res.type("text/xml").send(twiml.toString());
   } catch (err) {
     console.error("WHATSAPP WEBHOOK ERROR:", err);
