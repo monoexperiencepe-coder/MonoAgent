@@ -544,6 +544,25 @@ const NOT_STANDALONE_CITY = new Set([
 /**
  * Ciudad o distrito (Lima) cuando el cliente responde solo con el nombre, p. ej. "cusco", "surco".
  */
+/** Una sola línea tipo "insurgentes 144" (WhatsApp aparte del nombre / DNI). */
+function looksLikeShortStreetAddress(raw) {
+  const t = trimStr(raw);
+  if (!t || t.length < 5 || t.length > 200) return false;
+  if (/^\d{8}$/.test(t)) return false;
+  if (!/\d/.test(t)) return false;
+  if (!/[a-záéíóúñ]{2,}/i.test(t)) return false;
+  const lower = t.toLowerCase();
+  if (
+    /\b(?:polo|polos|talla|dame|quiero|pack|envio|envío|yape|pago|separa|aparta|modelos)\b/i.test(lower)
+  ) {
+    return false;
+  }
+  if (/\b(?:^|\s)(?:xl|s|m|l)\b/i.test(lower) && /\b(?:dame|talla|polos)\b/i.test(lower)) return false;
+  const words = t.split(/\s+/).filter(Boolean).length;
+  if (words > 14) return false;
+  return true;
+}
+
 function extractPlainDestinationCity(raw, patch) {
   if (patch.city) return;
   if (!raw || /\d/.test(raw)) return;
@@ -647,6 +666,15 @@ function extractCustomerDataPatch(message) {
 
   extractPlainDestinationCity(raw, patch);
 
+  if (!patch.address && looksLikeShortStreetAddress(raw)) {
+    patch.address = trimStr(raw);
+  }
+
+  const soloDigits = trimStr(raw);
+  if (/^\d{8}$/.test(soloDigits)) {
+    patch.dni = soloDigits;
+  }
+
   const badNames = /^(uno|dos|tres|cuatro|cinco|seis|s|m|l|xl)$/i;
   if (patch.name && badNames.test(patch.name)) delete patch.name;
 
@@ -739,8 +767,9 @@ function updateSession(session, message) {
   if (!session.customerData || typeof session.customerData !== "object") {
     session.customerData = {};
   }
+  const priorCustomerData = session.customerData;
   const custPatch = extractCustomerDataPatch(String(message).trim());
-  session.customerData = mergeCustomerData(session.customerData, custPatch);
+  session.customerData = mergeCustomerData(priorCustomerData, custPatch);
 
   recomputeStage(session);
 
@@ -1080,7 +1109,7 @@ async function runChatHandler(res, { sessionId, trimmedMessage, systemPrompt, fa
 }
 
 /** Buffer corto WhatsApp vía Supabase (Twilio = un POST por mensaje; sin esperar en memoria). */
-const WHATSAPP_PENDING_TTL_MS = 5000;
+const WHATSAPP_PENDING_TTL_MS = 8000;
 
 async function clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs) {
   await setSessionPendingMessage(sessionId, null);
@@ -1090,7 +1119,7 @@ async function clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, 
 
 /**
  * Mensajes con <3 palabras acumulan en `sessions.pending_message`.
- * Dentro de 5s: concatena y procesa junto; fuera de 5s: procesa el pendiente y luego el nuevo.
+ * Dentro de 8s: concatena y procesa junto con un solo runChatCore; si expiró, también se concatena en un solo run.
  */
 async function handleWhatsAppInbound(sessionId, trimmedMessage) {
   const { systemPrompt, faqs } = await getAgentConfig();
@@ -1114,9 +1143,9 @@ async function handleWhatsAppInbound(sessionId, trimmedMessage) {
       const { reply } = await clearPendingThenRunChat(sessionId, combined, systemPrompt, faqs);
       return { replies: [reply] };
     }
-    const { reply: r1 } = await clearPendingThenRunChat(sessionId, pendingDb.text, systemPrompt, faqs);
-    const { reply: r2 } = await clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs);
-    return { replies: [r1, r2] };
+    const combinedExpired = `${pendingDb.text} ${trimmedMessage}`.trim();
+    const { reply } = await clearPendingThenRunChat(sessionId, combinedExpired, systemPrompt, faqs);
+    return { replies: [reply] };
   }
 
   if (!pendingDb) {
@@ -1135,17 +1164,9 @@ async function handleWhatsAppInbound(sessionId, trimmedMessage) {
     return { replies: [reply] };
   }
 
-  const { reply: r1 } = await clearPendingThenRunChat(sessionId, pendingDb.text, systemPrompt, faqs);
-  const wcNew = messageWordCount(trimmedMessage);
-  if (isImmediateConfirmationMessage(trimmedMessage) || wcNew >= 3) {
-    const { reply: r2 } = await clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs);
-    return { replies: [r1, r2] };
-  }
-  await setSessionPendingMessage(sessionId, {
-    text: trimmedMessage,
-    at: new Date().toISOString(),
-  });
-  return { replies: [r1] };
+  const combinedShort = `${pendingDb.text} ${trimmedMessage}`.trim();
+  const { reply } = await clearPendingThenRunChat(sessionId, combinedShort, systemPrompt, faqs);
+  return { replies: [reply] };
 }
 
 app.post("/chat", async (req, res) => {
