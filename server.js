@@ -68,6 +68,41 @@ function stripAccentsAscii(s) {
     .toLowerCase();
 }
 
+const IMMEDIATE_WORDS_RAW = [
+  "si",
+  "sí",
+  "no",
+  "ok",
+  "dale",
+  "listo",
+  "ya",
+  "claro",
+  "perfecto",
+  "bueno",
+  "exacto",
+  "correcto",
+  "negativo",
+  "confirmo",
+  "confirmado",
+  "de acuerdo",
+  "va",
+  "sale",
+];
+
+const IMMEDIATE_WORDS = new Set(IMMEDIATE_WORDS_RAW.map((w) => stripAccentsAscii(w).toLowerCase().trim()));
+
+function normalizeForImmediateMatch(s) {
+  const t = stripAccentsAscii(String(s).trim()).toLowerCase();
+  return t.replace(/[!?.¡¿,…]+$/g, "").trim();
+}
+
+/** Confirmaciones de una palabra (o frase corta) que no deben ir al buffer de WhatsApp. */
+function isImmediateConfirmationMessage(message) {
+  const n = normalizeForImmediateMatch(message);
+  if (!n) return false;
+  return IMMEDIATE_WORDS.has(n);
+}
+
 /** Solo intención de pedir, sin número ni talla (p. ej. "dame", "quiero"). */
 const INCOMPLETE_INTENT_WORDS = new Set([
   "dame",
@@ -131,6 +166,12 @@ function extractItems(message) {
 
   runPhase(String.raw`(\d+)\s+en\s+(?:talla\s+)${SIZE_ALT}\b`, (m) => add(m[2], m[1]));
   runPhase(String.raw`(\d+)\s+en\s+${SIZE_ALT}\b`, (m) => add(m[2], m[1]));
+
+  runPhase(String.raw`\bambas\s+en\s+(?:talla\s+)?${SIZE_ALT}\b`, (m) => add(m[1], 2));
+  runPhase(String.raw`\blas\s+dos\s+en\s+(?:talla\s+)?${SIZE_ALT}\b`, (m) => add(m[1], 2));
+  runPhase(String.raw`\blos\s+dos\s+en\s+(?:talla\s+)?${SIZE_ALT}\b`, (m) => add(m[1], 2));
+  runPhase(String.raw`\bambos\s+en\s+(?:talla\s+)?${SIZE_ALT}\b`, (m) => add(m[1], 2));
+  runPhase(String.raw`\blas\s+2\s+en\s+(?:talla\s+)?${SIZE_ALT}\b`, (m) => add(m[1], 2));
 
   runPhase(String.raw`\b${SIZE_ALT}\s*[x×]\s*${QTY_WORD}\b`, (m) => add(m[1], m[2]));
 
@@ -706,6 +747,27 @@ function updateSession(session, message) {
   console.log("[SESSION] Estado actualizado:", session);
 }
 
+/** items[] = una sola línea con qty 2 y una talla (ej. "ambas en M" tras M o L). */
+function buildTwoPolosShippingAugmentation(session) {
+  if (!hasLineItems(session)) return "";
+  const active = (session.items || []).filter((i) => Number(i.qty) > 0);
+  if (active.length !== 1) return "";
+  const q = Number(active[0].qty);
+  const sz = normalizeSessionSizeToken(active[0].size);
+  if (q !== 2 || !sz) return "";
+  return `PEDIDO 2×UNA TALLA (items[] = exactamente 2 polos talla ${sz}; cantidad y talla YA cerradas — prioridad sobre CONFIRMACIÓN DE TALLA):
+En ESTE turno responde al cliente DIRECTAMENTE con este cuerpo (puedes ajustar mínimamente el tono; no cambies S/110 ni la lista de datos):
+
+"Perfecto 🙌 2 polos talla ${sz} → S/110
+Delivery GRATIS 🚚
+Para programar tu envío necesito:
+- Nombre completo
+- DNI (si es provincia)
+- Dirección 📍"
+
+PROHIBIDO en este turno: volver a preguntar cantidad, pedir elegir entre tallas, o reabrir el paso de "¿cuántos te llevo?".`;
+}
+
 function sessionStateForPrompt(session) {
   const cd = session.customerData && typeof session.customerData === "object" ? session.customerData : {};
   const rec = normalizeSessionSizeToken(session.recommendedSize) || null;
@@ -740,6 +802,7 @@ function buildSessionSystemAugmentation(session) {
     session._incompleteOrderQtyHint === true
       ? `INTENCIÓN DE PEDIDO SIN CANTIDAD: el cliente mandó solo "dame", "quiero", "ponme", "separa" (o similar) sin número ni talla nueva, y ya hay talla en contexto (items[] / recomendación / candidato único). NO reinicies el contexto ni vuelvas a presentar el producto. Responde muy breve con una sola pregunta, por ejemplo: "¿Dame cuántos? 😊" o "¿Cuántos te separo? 😊"`
       : "";
+  const twoPolosShippingAug = buildTwoPolosShippingAugmentation(session);
   const hasSizeAndQty = hasLineItems(session);
   const promoRules = session.promoShown
     ? `PROMOS (promoShown=true) — REGLA DURA:
@@ -791,7 +854,7 @@ ${JSON.stringify(sessionStateForPrompt(session))}
 ${orderLock ? `${orderLock}\n\n` : ""}Desglose obligatorio (repite tal cual en confirmaciones; formato compacto tipo "2 M y 1 L"):
 ${lines}
 
-${custBlock ? `${custBlock}\n\n` : ""}${incompleteQtyHint ? `${incompleteQtyHint}\n\n` : ""}${recommendedLine ? `${recommendedLine}\n\n` : ""}${candLine ? `${candLine}\n` : ""}
+${custBlock ? `${custBlock}\n\n` : ""}${incompleteQtyHint ? `${incompleteQtyHint}\n\n` : ""}${twoPolosShippingAug ? `${twoPolosShippingAug}\n\n` : ""}${recommendedLine ? `${recommendedLine}\n\n` : ""}${candLine ? `${candLine}\n` : ""}
 
 ${promoRules ? `${promoRules}\n\n` : ""}${priceRules}
 
@@ -1037,8 +1100,9 @@ async function handleWhatsAppInbound(sessionId, trimmedMessage) {
   const stored = await getSession(sessionId);
   const pendingDb = stored?.pendingMessage ?? null;
   const wc = messageWordCount(trimmedMessage);
+  const bypassShortBuffer = isImmediateConfirmationMessage(trimmedMessage) || wc >= 3;
 
-  if (wc >= 3) {
+  if (bypassShortBuffer) {
     if (!pendingDb) {
       const { reply } = await clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs);
       return { replies: [reply] };
@@ -1073,7 +1137,7 @@ async function handleWhatsAppInbound(sessionId, trimmedMessage) {
 
   const { reply: r1 } = await clearPendingThenRunChat(sessionId, pendingDb.text, systemPrompt, faqs);
   const wcNew = messageWordCount(trimmedMessage);
-  if (wcNew >= 3) {
+  if (isImmediateConfirmationMessage(trimmedMessage) || wcNew >= 3) {
     const { reply: r2 } = await clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs);
     return { replies: [r1, r2] };
   }
