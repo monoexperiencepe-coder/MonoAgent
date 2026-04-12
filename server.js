@@ -1021,6 +1021,7 @@ const WHATSAPP_PENDING_TTL_MS = 5000;
 
 async function clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs) {
   await setSessionPendingMessage(sessionId, null);
+  console.log("[WHATSAPP] Llamando runChatCore con sessionId:", sessionId);
   return runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs });
 }
 
@@ -1030,6 +1031,9 @@ async function clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, 
  */
 async function handleWhatsAppInbound(sessionId, trimmedMessage) {
   const { systemPrompt, faqs } = await getAgentConfig();
+  console.log("[WHATSAPP] systemPrompt length:", systemPrompt?.length ?? 0);
+  console.log("[WHATSAPP] faqs count:", faqs?.length ?? 0);
+  console.log("[WHATSAPP] systemPrompt preview:", systemPrompt?.slice(0, 100));
   const stored = await getSession(sessionId);
   const pendingDb = stored?.pendingMessage ?? null;
   const wc = messageWordCount(trimmedMessage);
