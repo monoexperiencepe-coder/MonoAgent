@@ -75,41 +75,6 @@ function stripAccentsAscii(s) {
     .toLowerCase();
 }
 
-const IMMEDIATE_WORDS_RAW = [
-  "si",
-  "sí",
-  "no",
-  "ok",
-  "dale",
-  "listo",
-  "ya",
-  "claro",
-  "perfecto",
-  "bueno",
-  "exacto",
-  "correcto",
-  "negativo",
-  "confirmo",
-  "confirmado",
-  "de acuerdo",
-  "va",
-  "sale",
-];
-
-const IMMEDIATE_WORDS = new Set(IMMEDIATE_WORDS_RAW.map((w) => stripAccentsAscii(w).toLowerCase().trim()));
-
-function normalizeForImmediateMatch(s) {
-  const t = stripAccentsAscii(String(s).trim()).toLowerCase();
-  return t.replace(/[!?.¡¿,…]+$/g, "").trim();
-}
-
-/** Confirmaciones de una palabra (o frase corta) que no deben ir al buffer de WhatsApp. */
-function isImmediateConfirmationMessage(message) {
-  const n = normalizeForImmediateMatch(message);
-  if (!n) return false;
-  return IMMEDIATE_WORDS.has(n);
-}
-
 /** Solo intención de pedir, sin número ni talla (p. ej. "dame", "quiero"). */
 const INCOMPLETE_INTENT_WORDS = new Set([
   "dame",
@@ -1122,9 +1087,6 @@ async function runChatHandler(res, { sessionId, trimmedMessage, systemPrompt, fa
   }
 }
 
-/** Buffer corto WhatsApp vía Supabase (Twilio = un POST por mensaje; sin esperar en memoria). */
-const WHATSAPP_PENDING_TTL_MS = 8000;
-
 function getOwnerPhoneEnv() {
   return trimStr(process.env.OWNER_PHONE);
 }
@@ -1205,15 +1167,9 @@ async function handleInboundFromOwner(trimmedMessage, inboundTo) {
   console.log("[WHATSAPP] dueño: mensaje sin comando útil ni To de cliente; ignorado.");
 }
 
-async function clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs) {
-  await setSessionPendingMessage(sessionId, null);
-  console.log("[WHATSAPP] Llamando runChatCore con sessionId:", sessionId);
-  return runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs });
-}
-
 /**
- * Mensajes con <3 palabras acumulan en `sessions.pending_message`.
- * Dentro de 8s: concatena y procesa junto con un solo runChatCore; si expiró, también se concatena en un solo run.
+ * WhatsApp: un POST por mensaje; procesamiento inmediato (sin buffer en Supabase).
+ * Limpia `pending_message` al inicio por si quedó de despliegues anteriores.
  */
 async function handleWhatsAppInbound(sessionId, trimmedMessage, options = {}) {
   const ownerPhone = getOwnerPhoneEnv();
@@ -1221,6 +1177,8 @@ async function handleWhatsAppInbound(sessionId, trimmedMessage, options = {}) {
     await handleInboundFromOwner(trimmedMessage, options.inboundTo);
     return { emptyAck: true };
   }
+
+  await setSessionPendingMessage(sessionId, null);
 
   const stored = await getSession(sessionId);
   if (stored?.botPaused === true) {
@@ -1232,45 +1190,9 @@ async function handleWhatsAppInbound(sessionId, trimmedMessage, options = {}) {
   console.log("[WHATSAPP] systemPrompt length:", systemPrompt?.length ?? 0);
   console.log("[WHATSAPP] faqs count:", faqs?.length ?? 0);
   console.log("[WHATSAPP] systemPrompt preview:", systemPrompt?.slice(0, 100));
-  const pendingDb = stored?.pendingMessage ?? null;
-  const wc = messageWordCount(trimmedMessage);
-  const bypassShortBuffer = isImmediateConfirmationMessage(trimmedMessage) || wc >= 3;
 
-  if (bypassShortBuffer) {
-    if (!pendingDb) {
-      const { reply } = await clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs);
-      return { replies: [reply] };
-    }
-    const age = Date.now() - Date.parse(pendingDb.at);
-    const fresh = Number.isFinite(age) && age <= WHATSAPP_PENDING_TTL_MS;
-    if (fresh) {
-      const combined = `${pendingDb.text} ${trimmedMessage}`.trim();
-      const { reply } = await clearPendingThenRunChat(sessionId, combined, systemPrompt, faqs);
-      return { replies: [reply] };
-    }
-    const combinedExpired = `${pendingDb.text} ${trimmedMessage}`.trim();
-    const { reply } = await clearPendingThenRunChat(sessionId, combinedExpired, systemPrompt, faqs);
-    return { replies: [reply] };
-  }
-
-  if (!pendingDb) {
-    await setSessionPendingMessage(sessionId, {
-      text: trimmedMessage,
-      at: new Date().toISOString(),
-    });
-    return { emptyAck: true };
-  }
-
-  const age = Date.now() - Date.parse(pendingDb.at);
-  const fresh = Number.isFinite(age) && age <= WHATSAPP_PENDING_TTL_MS;
-  if (fresh) {
-    const combined = `${pendingDb.text} ${trimmedMessage}`.trim();
-    const { reply } = await clearPendingThenRunChat(sessionId, combined, systemPrompt, faqs);
-    return { replies: [reply] };
-  }
-
-  const combinedShort = `${pendingDb.text} ${trimmedMessage}`.trim();
-  const { reply } = await clearPendingThenRunChat(sessionId, combinedShort, systemPrompt, faqs);
+  console.log("[WHATSAPP] Llamando runChatCore con sessionId:", sessionId);
+  const { reply } = await runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs });
   return { replies: [reply] };
 }
 
