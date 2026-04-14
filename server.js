@@ -178,13 +178,25 @@ function extractOrphanQuantity(message) {
     String.raw`\b(?:dame|quiero|necesito|envíame|envia|mándame|mandame|pónme|ponme|deme)\s+${q}\b`
   );
   const m1 = s.match(verbRe);
-  if (m1) return parseQtyToken(m1[1]);
+  if (m1) {
+    const qty = parseQtyToken(m1[1]);
+    console.log("[ORPHAN] cantidad detectada:", qty);
+    return qty;
+  }
   const sonRe = new RegExp(String.raw`^\s*son\s+${q}\s*[!?.]*\s*$`);
   const m2 = s.match(sonRe);
-  if (m2) return parseQtyToken(m2[1]);
+  if (m2) {
+    const qty = parseQtyToken(m2[1]);
+    console.log("[ORPHAN] cantidad detectada:", qty);
+    return qty;
+  }
   const soloRe = new RegExp(String.raw`^\s*${q}\s*[!?.]*\s*$`);
   const m3 = s.match(soloRe);
-  if (m3) return parseQtyToken(m3[1]);
+  if (m3) {
+    const qty = parseQtyToken(m3[1]);
+    console.log("[ORPHAN] cantidad detectada:", qty);
+    return qty;
+  }
   return null;
 }
 
@@ -198,11 +210,18 @@ function uniqueImpliedSize(session) {
   const c = session.sizeCandidates;
   if (Array.isArray(c) && c.length === 1) {
     const one = normalizeSessionSizeToken(c[0]);
-    if (one) return one;
+    if (one) {
+      console.log("[IMPLIED] talla implicada:", one);
+      return one;
+    }
   }
   const lines = (session.items || []).filter((i) => Number(i.qty) > 0);
   const sizes = [...new Set(lines.map((i) => normalizeSessionSizeToken(i.size)).filter(Boolean))];
-  if (sizes.length === 1) return sizes[0];
+  if (sizes.length === 1) {
+    const size = sizes[0];
+    console.log("[IMPLIED] talla implicada:", size);
+    return size;
+  }
   return null;
 }
 
@@ -213,7 +232,10 @@ function uniqueImpliedSize(session) {
 function orphanImpliedSize(session) {
   if (!hasLineItems(session)) {
     const rec = normalizeSessionSizeToken(session.recommendedSize);
-    if (rec) return rec;
+    if (rec) {
+      console.log("[IMPLIED] talla implicada:", rec);
+      return rec;
+    }
   }
   return uniqueImpliedSize(session);
 }
@@ -692,6 +714,11 @@ function recomputeStage(session) {
 }
 
 function updateSession(session, message) {
+  console.log("[UPDATE] mensaje:", message);
+  console.log("[UPDATE] session.items antes:", JSON.stringify(session.items));
+  console.log("[UPDATE] session.recommendedSize:", session.recommendedSize);
+  console.log("[UPDATE] session.sizeCandidates:", session.sizeCandidates);
+
   const m = String(message).trim().toLowerCase();
 
   if (!session.product && m.includes("high cotton")) {
@@ -752,6 +779,8 @@ function updateSession(session, message) {
 
   recomputeStage(session);
 
+  console.log("[UPDATE] session.items después:", JSON.stringify(session.items));
+  console.log("[UPDATE] session.stage:", session.stage);
   console.log("[SESSION] Estado actualizado:", session);
 }
 
