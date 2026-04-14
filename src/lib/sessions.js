@@ -160,12 +160,31 @@ function normalizeLastOrphanQtyField(v) {
   return Math.min(Math.floor(n), 9999);
 }
 
+/** Historial Anthropic persistido en `messages` (jsonb): [{ role, content }, ...] */
+function parsePersistedChatHistory(raw) {
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const first = raw[0];
+  if (!first || typeof first !== "object") return [];
+  if (first.role !== "user" && first.role !== "assistant") return [];
+  const out = [];
+  for (const row of raw) {
+    if (!row || typeof row !== "object") continue;
+    const role = row.role;
+    if (role !== "user" && role !== "assistant") continue;
+    const content = row.content != null ? String(row.content) : "";
+    if (!String(content).trim()) continue;
+    out.push({ role, content: content.slice(0, 50000) });
+  }
+  return out.slice(-40);
+}
+
 function normalizeRow(data) {
   if (!data || typeof data !== "object") return null;
 
   const pendingMessage = parsePendingMessage(data.pending_message ?? data.pendingMessage);
   const botPaused = normalizeBotPaused(data.bot_paused ?? data.botPaused);
   const lastOrphanQty = normalizeLastOrphanQtyField(data.last_orphan_qty ?? data.lastOrphanQty);
+  const persistedChat = parsePersistedChatHistory(data.messages);
 
   if (Array.isArray(data.items)) {
     return {
@@ -179,6 +198,7 @@ function normalizeRow(data) {
       pendingMessage,
       botPaused,
       lastOrphanQty,
+      messages: persistedChat,
     };
   }
 
@@ -193,13 +213,14 @@ function normalizeRow(data) {
         pendingMessage,
         botPaused,
         lastOrphanQty,
+        messages: persistedChat,
       };
     }
   }
 
-  if (data.messages != null) {
+  if (data.messages != null && persistedChat.length === 0) {
     const legacy = legacyFromMessages(data.messages);
-    if (legacy) return { ...legacy, pendingMessage, botPaused, lastOrphanQty };
+    if (legacy) return { ...legacy, pendingMessage, botPaused, lastOrphanQty, messages: [] };
   }
 
   return {
@@ -213,7 +234,22 @@ function normalizeRow(data) {
     pendingMessage,
     botPaused,
     lastOrphanQty,
+    messages: persistedChat,
   };
+}
+
+function serializeMessagesForDb(messages) {
+  if (!Array.isArray(messages)) return [];
+  const out = [];
+  for (const row of messages) {
+    if (!row || typeof row !== "object") continue;
+    const role = row.role;
+    if (role !== "user" && role !== "assistant") continue;
+    const content = row.content != null ? String(row.content) : "";
+    if (!String(content).trim()) continue;
+    out.push({ role, content: content.slice(0, 50000) });
+  }
+  return out.slice(-20);
 }
 
 function rowForUpsert(state) {
@@ -225,7 +261,8 @@ function rowForUpsert(state) {
   const customer_data = normalizeCustomerData(state?.customerData);
   const recommended_size = normalizeRecommendedSizeField(state?.recommendedSize);
   const last_orphan_qty = normalizeLastOrphanQtyField(state?.lastOrphanQty);
-  return { product, items, stage, size_candidates, promo_shown, customer_data, recommended_size, last_orphan_qty };
+  const messages = serializeMessagesForDb(state?.messages);
+  return { product, items, stage, size_candidates, promo_shown, customer_data, recommended_size, last_orphan_qty, messages };
 }
 
 /**
@@ -238,6 +275,7 @@ function rowForUpsert(state) {
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pending_message jsonb DEFAULT NULL;
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS bot_paused boolean DEFAULT false;
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_orphan_qty integer DEFAULT NULL;
+ * La columna `messages` (jsonb) puede guardar historial Anthropic [{ role, content }, ...] (últimos 20 al guardar).
  */
 export async function saveSession(sessionId, state) {
   const supabase = getSupabase();
@@ -252,6 +290,7 @@ export async function saveSession(sessionId, state) {
     customer_data: row.customer_data,
     recommended_size: row.recommended_size,
     last_orphan_qty: row.last_orphan_qty,
+    messages: row.messages,
     updated_at: new Date().toISOString(),
   });
   if (error) throw toError(error);
@@ -344,6 +383,7 @@ export async function setSessionPendingMessage(sessionId, pendingMessage) {
     customer_data: {},
     recommended_size: null,
     last_orphan_qty: null,
+    messages: [],
     pending_message: pendingMessage,
     updated_at: now,
   });

@@ -260,6 +260,8 @@ function extractRecommendedSizeFromReply(reply) {
   const sz = String.raw`(xl|s|m|l)\b`;
   const sources = [
     String.raw`\btallas?\s+${sz}`,
+    String.raw`\btalla\s+${sz}[\s!?👌✅]`,
+    String.raw`^[^a-z]*(xl|s|m|l)\s*[!?👌✅]`,
     String.raw`\buna\s+${sz}`,
     String.raw`\bun\s+${sz}`,
     String.raw`(?:te\s+recomiendo|recomiendo|te\s+qued[aá]|te\s+ir[ií]a)\s+(?:mejor\s+)?(?:la\s+|el\s+|talla\s+)?${sz}`,
@@ -354,6 +356,7 @@ function sessionFromStored(stored) {
       customerData: {},
       recommendedSize: null,
       lastOrphanQty: null,
+      messages: [],
     };
   }
   const raw = Array.isArray(stored.items)
@@ -371,6 +374,7 @@ function sessionFromStored(stored) {
   const lo = stored.lastOrphanQty;
   const lastOrphanQty =
     lo != null && Number.isFinite(Number(lo)) && Number(lo) >= 1 ? Math.min(Math.floor(Number(lo)), 9999) : null;
+  const messages = Array.isArray(stored.messages) ? [...stored.messages] : [];
   return {
     product: stored.product ?? null,
     items,
@@ -380,6 +384,7 @@ function sessionFromStored(stored) {
     customerData,
     recommendedSize,
     lastOrphanQty,
+    messages,
   };
 }
 
@@ -748,7 +753,7 @@ function updateSession(session, message) {
 
   const m = String(message).trim().toLowerCase();
 
-  if (!session.product && m.includes("high cotton")) {
+  if (!session.product) {
     session.product = "high_cotton";
   }
 
@@ -759,8 +764,11 @@ function updateSession(session, message) {
     session.sizeCandidates = [];
   }
 
+  /** Cantidad de huérfano / "todos en M" fijada en este turno (no sobrescribir con total erróneo). */
+  let pinnedOrphanQty = null;
+
   let skipExtractItems = false;
-  const todosEn = session.product ? extractTodosEnTalla(message) : null;
+  const todosEn = extractTodosEnTalla(message);
   if (todosEn) {
     console.log("[ORPHAN] recommendedSize en sesión:", session.recommendedSize);
     console.log("[ORPHAN] items actuales:", JSON.stringify(session.items));
@@ -770,6 +778,7 @@ function updateSession(session, message) {
     session.sizeCandidates = [];
     session.recommendedSize = null;
     session.lastOrphanQty = qty;
+    pinnedOrphanQty = qty;
     skipExtractItems = true;
   }
 
@@ -779,10 +788,11 @@ function updateSession(session, message) {
     if (isReplaceIntent) {
       session.items = [];
       session.lastOrphanQty = null;
+      pinnedOrphanQty = null;
     }
     applyExtractedLineItems(session, incoming);
     session.sizeCandidates = [];
-  } else if (session.product) {
+  } else {
     const orphan = extractOrphanQuantity(message);
     if (orphan != null && orphan >= 1) {
       const implied = impliedSizeForOrphanQty(session);
@@ -791,6 +801,7 @@ function updateSession(session, message) {
         session.sizeCandidates = [];
         session.recommendedSize = null;
         session.lastOrphanQty = orphan;
+        pinnedOrphanQty = orphan;
       }
     }
     if (!hasLineItems(session)) {
@@ -803,7 +814,9 @@ function updateSession(session, message) {
 
   session.items = mergeItems([], session.items);
   const totMerged = totalItemQty(session);
-  if (totMerged > 0) {
+  if (pinnedOrphanQty != null) {
+    session.lastOrphanQty = pinnedOrphanQty;
+  } else if (totMerged > 0) {
     session.lastOrphanQty = totMerged;
   }
 
@@ -858,6 +871,7 @@ function sessionStateForPrompt(session) {
   const lo = session.lastOrphanQty;
   const lastOrphanQty =
     lo != null && Number.isFinite(Number(lo)) && Number(lo) >= 1 ? Math.min(Math.floor(Number(lo)), 9999) : null;
+  const msgHist = Array.isArray(session.messages) ? session.messages : [];
   return {
     product: session.product,
     items: session.items,
@@ -867,6 +881,7 @@ function sessionStateForPrompt(session) {
     customerData: { ...cd },
     recommendedSize: rec,
     lastOrphanQty,
+    messages: msgHist.map((m) => ({ role: m.role, content: String(m.content ?? "") })),
   };
 }
 
@@ -1095,6 +1110,9 @@ const distPath = existsSync(join(__dirname, "client/dist"))
 /** sessionId → buffer de mensajes cortos (<3 palabras) antes de procesar (debounce 2s). */
 const messageBuffers = new Map();
 
+/** sessionId → historial Anthropic [{ role, content }] (hasta 40 entradas en memoria). */
+const sessionHistories = new Map();
+
 /** Núcleo compartido entre /chat y /whatsapp (sesión, LLM, persistencia). */
 async function runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs }) {
   console.log("[SESSION] Buscando sesión:", sessionId);
@@ -1104,6 +1122,7 @@ async function runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs }) {
   const session = sessionFromStored(stored);
   if (!Array.isArray(session.items)) session.items = [];
   if (!Array.isArray(session.sizeCandidates)) session.sizeCandidates = [];
+  if (!Array.isArray(session.messages)) session.messages = [];
   session.product = session.product ?? null;
   session.stage = session.stage ?? "exploration";
   session.promoShown = !!session.promoShown;
@@ -1123,9 +1142,19 @@ async function runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs }) {
   const basePrompt = typeof systemPrompt === "string" ? systemPrompt : "";
   const augmentedSystem = [basePrompt, buildSessionSystemAugmentation(session)].filter(Boolean).join("\n\n");
 
+  if (!sessionHistories.has(sessionId)) {
+    sessionHistories.set(sessionId, []);
+  }
+  let history = sessionHistories.get(sessionId);
+  if (history.length === 0 && session.messages.length > 0) {
+    sessionHistories.set(sessionId, session.messages.slice(-40));
+    history = sessionHistories.get(sessionId);
+  }
+
   let reply = await generateResponse(trimmedMessage, {
     systemPrompt: augmentedSystem,
     faqs: Array.isArray(faqs) ? faqs : [],
+    history,
   });
 
   if (typeof reply !== "string") {
@@ -1139,6 +1168,13 @@ async function runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs }) {
   }
 
   session.promoShown = true;
+
+  history.push({ role: "user", content: trimmedMessage });
+  history.push({ role: "assistant", content: reply });
+  if (history.length > 40) {
+    history.splice(0, history.length - 40);
+  }
+  session.messages = history.slice(-20);
 
   const stateSnapshot = sessionStateForPrompt(session);
   console.log("[SESSION] Guardando sesión:", sessionId, stateSnapshot);

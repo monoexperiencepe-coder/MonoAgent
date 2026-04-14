@@ -26,9 +26,29 @@ function buildSystemPrompt(systemPrompt, faqs) {
   return parts.length ? parts.join("\n\n") : undefined;
 }
 
-export async function generateResponse(message, { systemPrompt = "", faqs = [] } = {}) {
+function sanitizeAnthropicHistory(history) {
+  if (!Array.isArray(history)) return [];
+  const out = [];
+  for (const row of history) {
+    if (!row || typeof row !== "object") continue;
+    const role = row.role;
+    if (role !== "user" && role !== "assistant") continue;
+    const text = String(row.content ?? "").trim();
+    if (!text) continue;
+    out.push({ role, content: text.slice(0, 50000) });
+  }
+  return out;
+}
+
+export async function generateResponse(message, { systemPrompt = "", faqs = [], history = [] } = {}) {
   const system = buildSystemPrompt(systemPrompt, faqs);
   const models = ["claude-opus-4-6", "claude-haiku-4-5-20251001"];
+  let trimmedHistory = sanitizeAnthropicHistory(history).slice(-20);
+  while (trimmedHistory.length > 0 && trimmedHistory[0].role === "assistant") {
+    trimmedHistory = trimmedHistory.slice(1);
+  }
+  const userContent = String(message ?? "").trim();
+  const messages = [...trimmedHistory, { role: "user", content: userContent || " " }];
 
   for (const model of models) {
     try {
@@ -37,7 +57,7 @@ export async function generateResponse(message, { systemPrompt = "", faqs = [] }
         model,
         max_tokens: 1024,
         ...(system ? { system } : {}),
-        messages: [{ role: "user", content: message }],
+        messages,
       });
       console.log(`[AI] Éxito con: ${model}`);
       const block = response.content?.find((b) => b.type === "text");
