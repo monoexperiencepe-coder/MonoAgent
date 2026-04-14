@@ -1125,6 +1125,86 @@ async function runChatHandler(res, { sessionId, trimmedMessage, systemPrompt, fa
 /** Buffer corto WhatsApp vía Supabase (Twilio = un POST por mensaje; sin esperar en memoria). */
 const WHATSAPP_PENDING_TTL_MS = 8000;
 
+function getOwnerPhoneEnv() {
+  return trimStr(process.env.OWNER_PHONE);
+}
+
+/** Convierte el argumento del dueño al id de sesión Twilio (p. ej. whatsapp:+51999888777). */
+function normalizeOwnerTargetSessionId(raw) {
+  const s = trimStr(raw);
+  if (!s) return null;
+  const sl = s.toLowerCase();
+  if (sl.startsWith("whatsapp:")) {
+    const rest = trimStr(s.slice("whatsapp:".length));
+    if (rest.startsWith("+")) return `whatsapp:${rest}`;
+    if (/^\d/.test(rest)) return `whatsapp:+${rest}`;
+    return `whatsapp:${rest}`;
+  }
+  if (s.startsWith("+")) return `whatsapp:${s}`;
+  if (/^\d{8,15}$/.test(s.replace(/\s+/g, ""))) return `whatsapp:+${s.replace(/\s+/g, "")}`;
+  return null;
+}
+
+async function handleOwnerOutboundCommands(trimmedMessage) {
+  const parts = trimStr(trimmedMessage).split(/\s+/).filter(Boolean);
+  if (!parts.length) return;
+  const cmd = parts[0].toLowerCase();
+  const targetRaw = parts.slice(1).join(" ").trim();
+  if (cmd !== "/pausar" && cmd !== "/reanudar") {
+    return false;
+  }
+  if (!targetRaw) {
+    console.warn("[WHATSAPP] dueño: falta el número de cliente tras", cmd);
+    return true;
+  }
+  const target = normalizeOwnerTargetSessionId(targetRaw);
+  if (!target) {
+    console.warn("[WHATSAPP] dueño: número de sesión inválido:", targetRaw);
+    return true;
+  }
+  try {
+    if (cmd === "/pausar") await setSessionBotPaused(target, true);
+    else await setSessionBotPaused(target, false);
+    console.log("[WHATSAPP] dueño:", cmd, "→", target);
+  } catch (err) {
+    if (err?.code === "SESSION_NOT_FOUND") console.warn("[WHATSAPP] dueño: sesión no encontrada:", target);
+    else console.error("[WHATSAPP] dueño:", err);
+  }
+  return true;
+}
+
+/** To de Twilio = otro participante (p. ej. cliente) cuando el dueño escribe en el hilo. */
+function looksLikeWhatsAppSessionId(s) {
+  const t = trimStr(s);
+  if (!/^whatsapp:\+\d{10,15}$/i.test(t)) return false;
+  return true;
+}
+
+/**
+ * Mensajes desde OWNER_PHONE: comandos /pausar y /reanudar, o auto-pausa si `inboundTo` es un id de cliente.
+ */
+async function handleInboundFromOwner(trimmedMessage, inboundTo) {
+  const ownerPhone = getOwnerPhoneEnv();
+  const handledCmd = await handleOwnerOutboundCommands(trimmedMessage);
+  if (handledCmd) return;
+
+  const to = trimStr(inboundTo ?? "");
+  const twilioOwn = trimStr(process.env.TWILIO_WHATSAPP_NUMBER);
+  const skipTo = twilioOwn && to === twilioOwn;
+  if (looksLikeWhatsAppSessionId(to) && to !== ownerPhone && !skipTo) {
+    try {
+      await setSessionBotPaused(to, true);
+      console.log("[WHATSAPP] dueño: auto-pausa por To →", to);
+    } catch (err) {
+      if (err?.code === "SESSION_NOT_FOUND") console.warn("[WHATSAPP] dueño: To sin sesión en DB:", to);
+      else console.error("[WHATSAPP] dueño:", err);
+    }
+    return;
+  }
+
+  console.log("[WHATSAPP] dueño: mensaje sin comando útil ni To de cliente; ignorado.");
+}
+
 async function clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, faqs) {
   await setSessionPendingMessage(sessionId, null);
   console.log("[WHATSAPP] Llamando runChatCore con sessionId:", sessionId);
@@ -1135,7 +1215,13 @@ async function clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, 
  * Mensajes con <3 palabras acumulan en `sessions.pending_message`.
  * Dentro de 8s: concatena y procesa junto con un solo runChatCore; si expiró, también se concatena en un solo run.
  */
-async function handleWhatsAppInbound(sessionId, trimmedMessage) {
+async function handleWhatsAppInbound(sessionId, trimmedMessage, options = {}) {
+  const ownerPhone = getOwnerPhoneEnv();
+  if (ownerPhone && sessionId === ownerPhone) {
+    await handleInboundFromOwner(trimmedMessage, options.inboundTo);
+    return { emptyAck: true };
+  }
+
   const stored = await getSession(sessionId);
   if (stored?.botPaused === true) {
     console.log("[WHATSAPP] Bot pausado para esta sesión; sin procesar ni responder.");
@@ -1320,7 +1406,7 @@ const twilioWebhookParser = express.urlencoded({ extended: false });
 
 app.post("/whatsapp", twilioWebhookParser, async (req, res) => {
   const body = req.body?.Body;
-  const from = req.body?.From;
+  const fromRaw = req.body?.From;
 
   const sendTwiM = (text) => {
     const twiml = new twilio.twiml.MessagingResponse();
@@ -1329,19 +1415,29 @@ app.post("/whatsapp", twilioWebhookParser, async (req, res) => {
   };
 
   try {
-    if (body == null || String(body).trim() === "") {
-      sendTwiM("No recibimos el mensaje. Intenta de nuevo.");
-      return;
-    }
-    if (from == null || String(from).trim() === "") {
+    const from = fromRaw == null ? "" : String(fromRaw).trim();
+    const trimmedMessage = body == null ? "" : String(body).trim();
+    const ownerPhone = getOwnerPhoneEnv();
+
+    if (!from) {
       sendTwiM("No pudimos identificar tu número.");
       return;
     }
 
-    const sessionId = String(from).trim();
-    const trimmedMessage = String(body).trim();
+    if (trimmedMessage === "") {
+      if (ownerPhone && from === ownerPhone) {
+        const twiml = new twilio.twiml.MessagingResponse();
+        res.type("text/xml").send(twiml.toString());
+        return;
+      }
+      sendTwiM("No recibimos el mensaje. Intenta de nuevo.");
+      return;
+    }
 
-    const result = await handleWhatsAppInbound(sessionId, trimmedMessage);
+    const sessionId = from;
+
+    const inboundTo = req.body?.To != null ? String(req.body.To).trim() : "";
+    const result = await handleWhatsAppInbound(sessionId, trimmedMessage, { inboundTo });
     const twiml = new twilio.twiml.MessagingResponse();
     if (result.emptyAck) {
       res.type("text/xml").send(twiml.toString());
