@@ -40,7 +40,11 @@ function normalizeRecommendedSizeField(v) {
   return k || null;
 }
 
-/** Buffer WhatsApp (Twilio): { text, at } con `at` ISO; null si vacío o inválido. */
+/**
+ * Buffer WhatsApp en `pending_message` (jsonb):
+ * - Acumulador: { parts: string[], last_at: ISO }
+ * - Legado: { text, at } (un solo fragmento)
+ */
 function parsePendingMessage(raw) {
   if (raw == null) return null;
   let obj = raw;
@@ -52,10 +56,66 @@ function parsePendingMessage(raw) {
     }
   }
   if (typeof obj !== "object" || obj === null || Array.isArray(obj)) return null;
+
+  if (Array.isArray(obj.parts) && obj.last_at != null) {
+    const parts = [];
+    for (const p of obj.parts) {
+      const s = String(p ?? "").trim().slice(0, 4000);
+      if (s) parts.push(s);
+    }
+    const last_at = String(obj.last_at).trim();
+    if (!last_at) return null;
+    return { parts, last_at };
+  }
+
   const text = obj.text != null ? String(obj.text).trim().slice(0, 4000) : "";
   const at = obj.at != null ? String(obj.at).trim() : "";
   if (!text || !at) return null;
   return { text, at };
+}
+
+/**
+ * Acumula un fragmento en `pending_message` y devuelve el `last_at` guardado (para el gate tras el sleep).
+ */
+export async function appendToWhatsAppBuffer(sessionId, text) {
+  const supabase = getSupabase();
+  const now = new Date().toISOString();
+  const piece = String(text ?? "").trim().slice(0, 4000);
+  if (!piece) return now;
+
+  const { data: row, error: selErr } = await supabase.from("sessions").select("pending_message").eq("id", sessionId).maybeSingle();
+  if (selErr) throw toError(selErr);
+
+  const prev = parsePendingMessage(row?.pending_message);
+  let parts = [];
+  if (prev?.parts && Array.isArray(prev.parts)) {
+    parts = [...prev.parts];
+  } else if (prev?.text) {
+    parts = [prev.text];
+  }
+  parts.push(piece);
+
+  const payload = { parts, last_at: now };
+  await setSessionPendingMessage(sessionId, payload);
+  return now;
+}
+
+/**
+ * Si `pending_message.last_at` coincide con `myTimestamp`, concatena parts, limpia el buffer y devuelve el texto.
+ * Si llegó un mensaje más reciente (otro `last_at`), devuelve null.
+ */
+export async function checkAndConsumePendingBuffer(sessionId, myTimestamp) {
+  const supabase = getSupabase();
+  const { data: row, error: selErr } = await supabase.from("sessions").select("pending_message").eq("id", sessionId).maybeSingle();
+  if (selErr) throw toError(selErr);
+
+  const p = parsePendingMessage(row?.pending_message);
+  if (!p?.parts || !Array.isArray(p.parts) || p.parts.length === 0) return null;
+  if (!p.last_at || String(p.last_at).trim() !== String(myTimestamp).trim()) return null;
+
+  const combined = p.parts.join(" ").trim().slice(0, 12000);
+  await setSessionPendingMessage(sessionId, null);
+  return combined || null;
 }
 
 function legacyFromMessages(msg) {

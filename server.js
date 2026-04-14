@@ -14,7 +14,8 @@ import {
   getSession,
   saveSession,
   mergeItems,
-  setSessionPendingMessage,
+  appendToWhatsAppBuffer,
+  checkAndConsumePendingBuffer,
   getActiveSessions,
   setSessionBotPaused,
 } from "./src/lib/sessions.js";
@@ -1283,9 +1284,11 @@ async function handleInboundFromOwner(trimmedMessage, inboundTo) {
   console.log("[WHATSAPP] dueño: mensaje sin comando útil ni To de cliente; ignorado.");
 }
 
+const WHATSAPP_BUFFER_DEBOUNCE_MS = 2500;
+
 /**
- * WhatsApp: un POST por mensaje; procesamiento inmediato (sin buffer en Supabase).
- * Limpia `pending_message` al inicio por si quedó de despliegues anteriores.
+ * WhatsApp: acumula fragmentos en Supabase (`pending_message`) y procesa tras 2.5s
+ * si este request sigue siendo el último en el buffer.
  */
 async function handleWhatsAppInbound(sessionId, trimmedMessage, options = {}) {
   const ownerPhone = getOwnerPhoneEnv();
@@ -1294,11 +1297,18 @@ async function handleWhatsAppInbound(sessionId, trimmedMessage, options = {}) {
     return { emptyAck: true };
   }
 
-  await setSessionPendingMessage(sessionId, null);
-
   const stored = await getSession(sessionId);
   if (stored?.botPaused === true) {
     console.log("[WHATSAPP] Bot pausado para esta sesión; sin procesar ni responder.");
+    return { emptyAck: true };
+  }
+
+  const myTimestamp = await appendToWhatsAppBuffer(sessionId, trimmedMessage);
+  await new Promise((r) => setTimeout(r, WHATSAPP_BUFFER_DEBOUNCE_MS));
+
+  const combinedMessage = await checkAndConsumePendingBuffer(sessionId, myTimestamp);
+  if (!combinedMessage) {
+    console.log("[WHATSAPP] Buffer consumido por otro mensaje más reciente; sin respuesta en este request.");
     return { emptyAck: true };
   }
 
@@ -1306,9 +1316,9 @@ async function handleWhatsAppInbound(sessionId, trimmedMessage, options = {}) {
   console.log("[WHATSAPP] systemPrompt length:", systemPrompt?.length ?? 0);
   console.log("[WHATSAPP] faqs count:", faqs?.length ?? 0);
   console.log("[WHATSAPP] systemPrompt preview:", systemPrompt?.slice(0, 100));
+  console.log("[WHATSAPP] Mensaje combinado del buffer:", combinedMessage.slice(0, 200));
 
-  console.log("[WHATSAPP] Llamando runChatCore con sessionId:", sessionId);
-  const { reply } = await runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs });
+  const { reply } = await runChatCore({ sessionId, trimmedMessage: combinedMessage, systemPrompt, faqs });
   return { replies: [reply] };
 }
 
