@@ -154,11 +154,18 @@ function normalizeBotPaused(v) {
   return v === true || v === 1 || v === "true";
 }
 
+function normalizeLastOrphanQtyField(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return Math.min(Math.floor(n), 9999);
+}
+
 function normalizeRow(data) {
   if (!data || typeof data !== "object") return null;
 
   const pendingMessage = parsePendingMessage(data.pending_message ?? data.pendingMessage);
   const botPaused = normalizeBotPaused(data.bot_paused ?? data.botPaused);
+  const lastOrphanQty = normalizeLastOrphanQtyField(data.last_orphan_qty ?? data.lastOrphanQty);
 
   if (Array.isArray(data.items)) {
     return {
@@ -171,6 +178,7 @@ function normalizeRow(data) {
       stage: data.stage ?? "exploration",
       pendingMessage,
       botPaused,
+      lastOrphanQty,
     };
   }
 
@@ -184,13 +192,14 @@ function normalizeRow(data) {
         recommendedSize: normalizeRecommendedSizeField(data.recommended_size ?? data.recommendedSize),
         pendingMessage,
         botPaused,
+        lastOrphanQty,
       };
     }
   }
 
   if (data.messages != null) {
     const legacy = legacyFromMessages(data.messages);
-    if (legacy) return { ...legacy, pendingMessage, botPaused };
+    if (legacy) return { ...legacy, pendingMessage, botPaused, lastOrphanQty };
   }
 
   return {
@@ -203,6 +212,7 @@ function normalizeRow(data) {
     stage: data.stage ?? "exploration",
     pendingMessage,
     botPaused,
+    lastOrphanQty,
   };
 }
 
@@ -214,7 +224,8 @@ function rowForUpsert(state) {
   const promo_shown = normalizePromoShown(state?.promoShown);
   const customer_data = normalizeCustomerData(state?.customerData);
   const recommended_size = normalizeRecommendedSizeField(state?.recommendedSize);
-  return { product, items, stage, size_candidates, promo_shown, customer_data, recommended_size };
+  const last_orphan_qty = normalizeLastOrphanQtyField(state?.lastOrphanQty);
+  return { product, items, stage, size_candidates, promo_shown, customer_data, recommended_size, last_orphan_qty };
 }
 
 /**
@@ -226,6 +237,7 @@ function rowForUpsert(state) {
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS recommended_size text DEFAULT NULL;
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pending_message jsonb DEFAULT NULL;
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS bot_paused boolean DEFAULT false;
+ * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_orphan_qty integer DEFAULT NULL;
  */
 export async function saveSession(sessionId, state) {
   const supabase = getSupabase();
@@ -239,6 +251,7 @@ export async function saveSession(sessionId, state) {
     promo_shown: row.promo_shown,
     customer_data: row.customer_data,
     recommended_size: row.recommended_size,
+    last_orphan_qty: row.last_orphan_qty,
     updated_at: new Date().toISOString(),
   });
   if (error) throw toError(error);
@@ -249,7 +262,7 @@ export async function getSession(sessionId) {
   const { data, error } = await supabase
     .from("sessions")
     .select(
-      "product, items, stage, size_candidates, promo_shown, customer_data, recommended_size, messages, pending_message, bot_paused"
+      "product, items, stage, size_candidates, promo_shown, customer_data, recommended_size, last_orphan_qty, messages, pending_message, bot_paused"
     )
     .eq("id", sessionId)
     .maybeSingle();
@@ -330,6 +343,7 @@ export async function setSessionPendingMessage(sessionId, pendingMessage) {
     promo_shown: false,
     customer_data: {},
     recommended_size: null,
+    last_orphan_qty: null,
     pending_message: pendingMessage,
     updated_at: now,
   });

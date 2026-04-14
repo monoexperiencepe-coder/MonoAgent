@@ -167,6 +167,19 @@ function extractItems(message) {
 }
 
 /**
+ * "Todos en M", "todo M", etc.: confirmar la cantidad ya acordada con una talla explícita
+ * (evita el falso positivo de extractItems que interpreta "dos" dentro de "todos").
+ */
+function extractTodosEnTalla(message) {
+  const s = String(message).trim().toLowerCase();
+  const re = /^\s*(todos|todas|todo|toda)(?:\s+en)?\s+(?:talla\s+)?(xl|s|m|l)\b/i;
+  const m = s.match(re);
+  if (!m) return null;
+  const sz = normSizeToken(m[2]);
+  return sz ? { size: sz } : null;
+}
+
+/**
  * Cantidad sin talla en el mismo mensaje (ej. "dame 3" tras haber dicho "talla m").
  * Solo si extractItems no encontró líneas; no usar si ya hay talla en el texto.
  */
@@ -226,16 +239,16 @@ function uniqueImpliedSize(session) {
 }
 
 /**
- * Talla implícita para cantidad huérfana ("dame 3"): con carrito vacío prioriza
- * session.recommendedSize (última recomendación del asistente); si no, sizeCandidates / items.
+ * Talla para cantidad huérfana ("3" solo): prioriza recommendedSize guardada en Supabase,
+ * luego candidato único / una talla en items.
  */
-function orphanImpliedSize(session) {
-  if (!hasLineItems(session)) {
-    const rec = normalizeSessionSizeToken(session.recommendedSize);
-    if (rec) {
-      console.log("[IMPLIED] talla implicada:", rec);
-      return rec;
-    }
+function impliedSizeForOrphanQty(session) {
+  console.log("[ORPHAN] recommendedSize en sesión:", session.recommendedSize);
+  console.log("[ORPHAN] items actuales:", JSON.stringify(session.items));
+  const rec = normalizeSessionSizeToken(session.recommendedSize);
+  if (rec) {
+    console.log("[IMPLIED] talla implicada:", rec);
+    return rec;
   }
   return uniqueImpliedSize(session);
 }
@@ -340,6 +353,7 @@ function sessionFromStored(stored) {
       promoShown: false,
       customerData: {},
       recommendedSize: null,
+      lastOrphanQty: null,
     };
   }
   const raw = Array.isArray(stored.items)
@@ -354,6 +368,9 @@ function sessionFromStored(stored) {
     rawCust && typeof rawCust === "object" && !Array.isArray(rawCust) ? { ...rawCust } : {};
   const recRaw = stored.recommendedSize ?? stored.recommended_size;
   const recommendedSize = normalizeSessionSizeToken(recRaw) || null;
+  const lo = stored.lastOrphanQty;
+  const lastOrphanQty =
+    lo != null && Number.isFinite(Number(lo)) && Number(lo) >= 1 ? Math.min(Math.floor(Number(lo)), 9999) : null;
   return {
     product: stored.product ?? null,
     items,
@@ -362,6 +379,7 @@ function sessionFromStored(stored) {
     promoShown: promoRaw === true || promoRaw === 1 || promoRaw === "true",
     customerData,
     recommendedSize,
+    lastOrphanQty,
   };
 }
 
@@ -374,6 +392,15 @@ function totalItemQty(session) {
     const q = Number(i.qty);
     return s + (Number.isFinite(q) && q > 0 ? q : 0);
   }, 0);
+}
+
+/** Cantidad previa para "todos en M": carrito o última cantidad huérfana persistida. */
+function getPreviousConfirmedQty(session) {
+  const t = totalItemQty(session);
+  if (t > 0) return t;
+  const lo = session.lastOrphanQty;
+  if (lo != null && Number.isFinite(Number(lo)) && Number(lo) >= 1) return Math.min(Math.floor(Number(lo)), 9999);
+  return null;
 }
 
 /** Precio total en soles para N polos (N = suma de cantidades del pedido). */
@@ -732,22 +759,38 @@ function updateSession(session, message) {
     session.sizeCandidates = [];
   }
 
-  const incoming = extractItems(message);
+  let skipExtractItems = false;
+  const todosEn = session.product ? extractTodosEnTalla(message) : null;
+  if (todosEn) {
+    console.log("[ORPHAN] recommendedSize en sesión:", session.recommendedSize);
+    console.log("[ORPHAN] items actuales:", JSON.stringify(session.items));
+    const prevQty = getPreviousConfirmedQty(session);
+    const qty = prevQty != null && prevQty >= 1 ? prevQty : 1;
+    session.items = replaceQtyForSingleSize(session.items, todosEn.size, qty);
+    session.sizeCandidates = [];
+    session.recommendedSize = null;
+    session.lastOrphanQty = qty;
+    skipExtractItems = true;
+  }
+
+  const incoming = skipExtractItems ? [] : extractItems(message);
   if (incoming.length > 0) {
     const isReplaceIntent = REPLACE_KEYWORDS.some((k) => m.includes(k));
     if (isReplaceIntent) {
       session.items = [];
+      session.lastOrphanQty = null;
     }
     applyExtractedLineItems(session, incoming);
     session.sizeCandidates = [];
   } else if (session.product) {
     const orphan = extractOrphanQuantity(message);
     if (orphan != null && orphan >= 1) {
-      const implied = orphanImpliedSize(session);
+      const implied = impliedSizeForOrphanQty(session);
       if (implied) {
         session.items = replaceQtyForSingleSize(session.items, implied, orphan);
         session.sizeCandidates = [];
         session.recommendedSize = null;
+        session.lastOrphanQty = orphan;
       }
     }
     if (!hasLineItems(session)) {
@@ -759,6 +802,10 @@ function updateSession(session, message) {
   }
 
   session.items = mergeItems([], session.items);
+  const totMerged = totalItemQty(session);
+  if (totMerged > 0) {
+    session.lastOrphanQty = totMerged;
+  }
 
   session._incompleteOrderQtyHint = false;
   const rawForHint = String(message).trim();
@@ -808,6 +855,9 @@ PROHIBIDO en este turno: volver a preguntar cantidad, pedir elegir entre tallas,
 function sessionStateForPrompt(session) {
   const cd = session.customerData && typeof session.customerData === "object" ? session.customerData : {};
   const rec = normalizeSessionSizeToken(session.recommendedSize) || null;
+  const lo = session.lastOrphanQty;
+  const lastOrphanQty =
+    lo != null && Number.isFinite(Number(lo)) && Number(lo) >= 1 ? Math.min(Math.floor(Number(lo)), 9999) : null;
   return {
     product: session.product,
     items: session.items,
@@ -816,6 +866,7 @@ function sessionStateForPrompt(session) {
     promoShown: !!session.promoShown,
     customerData: { ...cd },
     recommendedSize: rec,
+    lastOrphanQty,
   };
 }
 
