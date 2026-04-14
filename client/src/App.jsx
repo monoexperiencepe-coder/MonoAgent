@@ -4,6 +4,7 @@ import { AppStateProvider } from "./context/AppStateContext.jsx";
 import ChatPage from "./pages/ChatPage.jsx";
 import FAQsPage from "./pages/FAQsPage.jsx";
 import InstructionsPage from "./pages/InstructionsPage.jsx";
+import ConversationsPage from "./pages/ConversationsPage.jsx";
 import "./App.css";
 
 export default function App() {
@@ -16,6 +17,7 @@ export default function App() {
             <Route path="/" element={<ChatPage />} />
             <Route path="/instrucciones" element={<InstructionsPage />} />
             <Route path="/faqs" element={<FAQsPage />} />
+            <Route path="/conversaciones" element={<ConversationsPage />} />
           </Routes>
         </main>
       </div>

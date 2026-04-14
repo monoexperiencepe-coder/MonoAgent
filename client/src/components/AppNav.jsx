@@ -2,6 +2,7 @@ import { NavLink } from "react-router-dom";
 
 const links = [
   { to: "/", label: "Chat", icon: "💬", end: true },
+  { to: "/conversaciones", label: "Conversaciones", icon: "📱", end: false },
   { to: "/instrucciones", label: "Instrucciones", icon: "⚙️", end: false },
   { to: "/faqs", label: "FAQs", icon: "❓", end: false },
 ];
@@ -20,6 +21,7 @@ export function AppNav() {
               key={to}
               to={to}
               end={end}
+              title={label}
               className={({ isActive }) => linkClass(isActive)}
             >
               <span className="nav__icon" aria-hidden>
@@ -37,6 +39,7 @@ export function AppNav() {
             key={to}
             to={to}
             end={end}
+            title={label}
             className={({ isActive }) => linkClass(isActive)}
           >
             <span className="nav__icon" aria-hidden>

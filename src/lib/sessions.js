@@ -150,10 +150,15 @@ function rowFromItemsObject(obj, product, stage) {
   };
 }
 
+function normalizeBotPaused(v) {
+  return v === true || v === 1 || v === "true";
+}
+
 function normalizeRow(data) {
   if (!data || typeof data !== "object") return null;
 
   const pendingMessage = parsePendingMessage(data.pending_message ?? data.pendingMessage);
+  const botPaused = normalizeBotPaused(data.bot_paused ?? data.botPaused);
 
   if (Array.isArray(data.items)) {
     return {
@@ -165,6 +170,7 @@ function normalizeRow(data) {
       recommendedSize: normalizeRecommendedSizeField(data.recommended_size ?? data.recommendedSize),
       stage: data.stage ?? "exploration",
       pendingMessage,
+      botPaused,
     };
   }
 
@@ -177,13 +183,14 @@ function normalizeRow(data) {
         customerData: normalizeCustomerData(data.customer_data ?? data.customerData),
         recommendedSize: normalizeRecommendedSizeField(data.recommended_size ?? data.recommendedSize),
         pendingMessage,
+        botPaused,
       };
     }
   }
 
   if (data.messages != null) {
     const legacy = legacyFromMessages(data.messages);
-    if (legacy) return { ...legacy, pendingMessage };
+    if (legacy) return { ...legacy, pendingMessage, botPaused };
   }
 
   return {
@@ -195,6 +202,7 @@ function normalizeRow(data) {
     recommendedSize: normalizeRecommendedSizeField(data.recommended_size ?? data.recommendedSize),
     stage: data.stage ?? "exploration",
     pendingMessage,
+    botPaused,
   };
 }
 
@@ -217,6 +225,7 @@ function rowForUpsert(state) {
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS customer_data jsonb DEFAULT '{}'::jsonb;
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS recommended_size text DEFAULT NULL;
  * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS pending_message jsonb DEFAULT NULL;
+ * ALTER TABLE sessions ADD COLUMN IF NOT EXISTS bot_paused boolean DEFAULT false;
  */
 export async function saveSession(sessionId, state) {
   const supabase = getSupabase();
@@ -240,12 +249,58 @@ export async function getSession(sessionId) {
   const { data, error } = await supabase
     .from("sessions")
     .select(
-      "product, items, stage, size_candidates, promo_shown, customer_data, recommended_size, messages, pending_message"
+      "product, items, stage, size_candidates, promo_shown, customer_data, recommended_size, messages, pending_message, bot_paused"
     )
     .eq("id", sessionId)
     .maybeSingle();
   if (error) throw toError(error);
   return normalizeRow(data);
+}
+
+/**
+ * Sesiones con `updated_at` en las últimas 24 h (máx. 50), más recientes primero.
+ * Incluye columnas para listado y detalle en el panel.
+ */
+export async function getActiveSessions() {
+  const supabase = getSupabase();
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await supabase
+    .from("sessions")
+    .select("id, messages, customer_data, updated_at, bot_paused, items, stage, product")
+    .gte("updated_at", since)
+    .order("updated_at", { ascending: false })
+    .limit(50);
+  if (error) throw toError(error);
+  const rows = Array.isArray(data) ? data : [];
+  return rows.map((row) => {
+    const norm = normalizeRow(row);
+    return {
+      id: row.id,
+      updatedAt: row.updated_at ?? null,
+      botPaused: normalizeBotPaused(row.bot_paused),
+      customerData: norm?.customerData ?? {},
+      stage: norm?.stage ?? "exploration",
+      items: norm?.items ?? [],
+      product: norm?.product ?? null,
+    };
+  });
+}
+
+export async function setSessionBotPaused(sessionId, botPaused) {
+  const supabase = getSupabase();
+  const now = new Date().toISOString();
+  const { data, error } = await supabase
+    .from("sessions")
+    .update({ bot_paused: !!botPaused, updated_at: now })
+    .eq("id", sessionId)
+    .select("id")
+    .maybeSingle();
+  if (error) throw toError(error);
+  if (!data) {
+    const err = new Error("Sesión no encontrada");
+    err.code = "SESSION_NOT_FOUND";
+    throw err;
+  }
 }
 
 /**

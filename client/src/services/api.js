@@ -43,3 +43,52 @@ export async function sendChat({ message, sessionId, systemPrompt, faqs }) {
 
   return data ?? {};
 }
+
+export async function fetchActiveSessions() {
+  const res = await fetch(`${BASE_URL}/sessions`);
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+  if (!res.ok) {
+    throw new Error(errorTextFromResponseBody(data));
+  }
+  const sessions = Array.isArray(data?.sessions) ? data.sessions : [];
+  return { sessions };
+}
+
+export async function pauseSession(sessionId) {
+  const res = await fetch(`${BASE_URL}/sessions/${encodeURIComponent(sessionId)}/pause`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+  if (!res.ok) {
+    throw new Error(errorTextFromResponseBody(data));
+  }
+  return data ?? {};
+}
+
+export async function resumeSession(sessionId) {
+  const res = await fetch(`${BASE_URL}/sessions/${encodeURIComponent(sessionId)}/resume`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+  if (!res.ok) {
+    throw new Error(errorTextFromResponseBody(data));
+  }
+  return data ?? {};
+}

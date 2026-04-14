@@ -10,7 +10,14 @@ import { dirname, join } from "path";
 import twilio from "twilio";
 import { generateResponse } from "./src/services/aiService.js";
 import { getAgentConfig, saveAgentConfig } from "./src/lib/agentConfig.js";
-import { getSession, saveSession, mergeItems, setSessionPendingMessage } from "./src/lib/sessions.js";
+import {
+  getSession,
+  saveSession,
+  mergeItems,
+  setSessionPendingMessage,
+  getActiveSessions,
+  setSessionBotPaused,
+} from "./src/lib/sessions.js";
 import { httpErrorMessage, toError } from "./src/lib/errors.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -390,6 +397,13 @@ function calcPrice(n) {
   if (N === 2) return 110;
   if (N >= 3) return 150 + (N - 3) * 30;
   return null;
+}
+
+function sessionTotalsForPanel(row) {
+  const session = sessionFromStored({ items: row.items });
+  const totalQty = totalItemQty(session);
+  const totalSoles = totalQty > 0 ? calcPrice(totalQty) : null;
+  return { totalQty, totalSoles };
 }
 
 function formatItemsHuman(items) {
@@ -1122,11 +1136,16 @@ async function clearPendingThenRunChat(sessionId, trimmedMessage, systemPrompt, 
  * Dentro de 8s: concatena y procesa junto con un solo runChatCore; si expiró, también se concatena en un solo run.
  */
 async function handleWhatsAppInbound(sessionId, trimmedMessage) {
+  const stored = await getSession(sessionId);
+  if (stored?.botPaused === true) {
+    console.log("[WHATSAPP] Bot pausado para esta sesión; sin procesar ni responder.");
+    return { emptyAck: true };
+  }
+
   const { systemPrompt, faqs } = await getAgentConfig();
   console.log("[WHATSAPP] systemPrompt length:", systemPrompt?.length ?? 0);
   console.log("[WHATSAPP] faqs count:", faqs?.length ?? 0);
   console.log("[WHATSAPP] systemPrompt preview:", systemPrompt?.slice(0, 100));
-  const stored = await getSession(sessionId);
   const pendingDb = stored?.pendingMessage ?? null;
   const wc = messageWordCount(trimmedMessage);
   const bypassShortBuffer = isImmediateConfirmationMessage(trimmedMessage) || wc >= 3;
@@ -1247,6 +1266,54 @@ app.post("/chat", async (req, res) => {
       }
     });
   }, 2000);
+});
+
+app.get("/sessions", async (_req, res) => {
+  try {
+    const list = await getActiveSessions();
+    const sessions = list.map((row) => {
+      const { totalQty, totalSoles } = sessionTotalsForPanel(row);
+      return { ...row, totalQty, totalSoles };
+    });
+    res.json({ sessions });
+  } catch (err) {
+    console.error("[sessions] GET /sessions:", err);
+    res.status(500).json({ error: httpErrorMessage(err) });
+  }
+});
+
+app.post("/sessions/:id/pause", async (req, res) => {
+  const id = req.params?.id != null ? String(req.params.id).trim() : "";
+  if (!id) {
+    return res.status(400).json({ error: "id de sesión inválido" });
+  }
+  try {
+    await setSessionBotPaused(id, true);
+    res.json({ ok: true, id, botPaused: true });
+  } catch (err) {
+    if (err?.code === "SESSION_NOT_FOUND") {
+      return res.status(404).json({ error: err.message });
+    }
+    console.error("[sessions] pause:", err);
+    res.status(500).json({ error: httpErrorMessage(err) });
+  }
+});
+
+app.post("/sessions/:id/resume", async (req, res) => {
+  const id = req.params?.id != null ? String(req.params.id).trim() : "";
+  if (!id) {
+    return res.status(400).json({ error: "id de sesión inválido" });
+  }
+  try {
+    await setSessionBotPaused(id, false);
+    res.json({ ok: true, id, botPaused: false });
+  } catch (err) {
+    if (err?.code === "SESSION_NOT_FOUND") {
+      return res.status(404).json({ error: err.message });
+    }
+    console.error("[sessions] resume:", err);
+    res.status(500).json({ error: httpErrorMessage(err) });
+  }
 });
 
 const twilioWebhookParser = express.urlencoded({ extended: false });
