@@ -1284,10 +1284,10 @@ async function handleInboundFromOwner(trimmedMessage, inboundTo) {
   console.log("[WHATSAPP] dueño: mensaje sin comando útil ni To de cliente; ignorado.");
 }
 
-const WHATSAPP_BUFFER_DEBOUNCE_MS = 2500;
+const WHATSAPP_BUFFER_DEBOUNCE_MS = 1500;
 
 /**
- * WhatsApp: acumula fragmentos en Supabase (`pending_message`) y procesa tras 2.5s
+ * WhatsApp: acumula fragmentos en Supabase (`pending_message`) y procesa tras 1.5s
  * si este request sigue siendo el último en el buffer.
  */
 async function handleWhatsAppInbound(sessionId, trimmedMessage, options = {}) {

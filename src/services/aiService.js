@@ -42,7 +42,7 @@ function sanitizeAnthropicHistory(history) {
 
 export async function generateResponse(message, { systemPrompt = "", faqs = [], history = [] } = {}) {
   const system = buildSystemPrompt(systemPrompt, faqs);
-  const models = ["claude-opus-4-6", "claude-haiku-4-5-20251001"];
+  const models = ["claude-haiku-4-5-20251001", "claude-opus-4-6"];
   let trimmedHistory = sanitizeAnthropicHistory(history).slice(-20);
   while (trimmedHistory.length > 0 && trimmedHistory[0].role === "assistant") {
     trimmedHistory = trimmedHistory.slice(1);
