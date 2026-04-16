@@ -1284,11 +1284,17 @@ async function handleInboundFromOwner(trimmedMessage, inboundTo) {
   console.log("[WHATSAPP] dueño: mensaje sin comando útil ni To de cliente; ignorado.");
 }
 
-const WHATSAPP_BUFFER_DEBOUNCE_MS = 1500;
+// const WHATSAPP_BUFFER_DEBOUNCE_MS = 1500;
 
 /**
- * WhatsApp: acumula fragmentos en Supabase (`pending_message`) y procesa tras 1.5s
- * si este request sigue siendo el último en el buffer.
+ * WhatsApp: procesamiento directo (buffer Supabase desactivado temporalmente).
+ *
+ * Buffer acumulador (desactivado):
+ * const myTimestamp = await appendToWhatsAppBuffer(sessionId, trimmedMessage);
+ * await new Promise((r) => setTimeout(r, WHATSAPP_BUFFER_DEBOUNCE_MS));
+ * const combinedMessage = await checkAndConsumePendingBuffer(sessionId, myTimestamp);
+ * if (!combinedMessage) return { emptyAck: true };
+ * … getAgentConfig + runChatCore con combinedMessage
  */
 async function handleWhatsAppInbound(sessionId, trimmedMessage, options = {}) {
   const ownerPhone = getOwnerPhoneEnv();
@@ -1303,22 +1309,12 @@ async function handleWhatsAppInbound(sessionId, trimmedMessage, options = {}) {
     return { emptyAck: true };
   }
 
-  const myTimestamp = await appendToWhatsAppBuffer(sessionId, trimmedMessage);
-  await new Promise((r) => setTimeout(r, WHATSAPP_BUFFER_DEBOUNCE_MS));
-
-  const combinedMessage = await checkAndConsumePendingBuffer(sessionId, myTimestamp);
-  if (!combinedMessage) {
-    console.log("[WHATSAPP] Buffer consumido por otro mensaje más reciente; sin respuesta en este request.");
-    return { emptyAck: true };
-  }
-
   const { systemPrompt, faqs } = await getAgentConfig();
   console.log("[WHATSAPP] systemPrompt length:", systemPrompt?.length ?? 0);
   console.log("[WHATSAPP] faqs count:", faqs?.length ?? 0);
   console.log("[WHATSAPP] systemPrompt preview:", systemPrompt?.slice(0, 100));
-  console.log("[WHATSAPP] Mensaje combinado del buffer:", combinedMessage.slice(0, 200));
 
-  const { reply } = await runChatCore({ sessionId, trimmedMessage: combinedMessage, systemPrompt, faqs });
+  const { reply } = await runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs });
   return { replies: [reply] };
 }
 
@@ -1503,6 +1499,100 @@ app.post("/whatsapp", twilioWebhookParser, async (req, res) => {
       twiml.message("Lo siento, hubo un error. Intenta en un momento.");
       res.type("text/xml").send(twiml.toString());
     }
+  }
+});
+
+async function sendWhatsAppMessage(to, text) {
+  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  const url = `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: { body: text },
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    console.error("[META] Error enviando mensaje:", err);
+    throw new Error(`Meta API error: ${response.status}`);
+  }
+  return response.json();
+}
+
+app.get("/webhook", (req, res) => {
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
+    console.log("[META] Webhook verificado");
+    res.status(200).send(challenge);
+  } else {
+    console.warn("[META] Verificación fallida");
+    res.sendStatus(403);
+  }
+});
+
+app.post("/webhook", express.json(), async (req, res) => {
+  // Meta exige 200 inmediato o reintenta.
+  res.sendStatus(200);
+
+  try {
+    const entry = req.body?.entry?.[0];
+    const change = entry?.changes?.[0];
+    const value = change?.value;
+
+    // Ignorar si no es mensaje de texto entrante.
+    if (!value?.messages?.length) return;
+    const msg = value.messages[0];
+    if (msg.type !== "text") return;
+
+    const from = msg.from;
+    const text = msg.text?.body?.trim();
+    if (!from || !text) return;
+
+    const sessionId = `whatsapp:+${from}`;
+
+    const ownerPhone = getOwnerPhoneEnv();
+    if (ownerPhone && sessionId === ownerPhone) {
+      await handleInboundFromOwner(text, null);
+      return;
+    }
+
+    const stored = await getSession(sessionId);
+    if (stored?.botPaused === true) {
+      console.log("[META] Bot pausado para:", sessionId);
+      return;
+    }
+
+    const myTimestamp = await appendToWhatsAppBuffer(sessionId, text);
+    await new Promise((r) => setTimeout(r, 1500));
+    const combinedMessage = await checkAndConsumePendingBuffer(sessionId, myTimestamp);
+    if (!combinedMessage) return;
+
+    const { systemPrompt, faqs } = await getAgentConfig();
+    const { reply } = await runChatCore({
+      sessionId,
+      trimmedMessage: combinedMessage,
+      systemPrompt,
+      faqs,
+    });
+
+    if (reply?.trim()) {
+      await sendWhatsAppMessage(from, reply);
+    }
+  } catch (err) {
+    console.error("[META] Error en webhook POST:", err);
   }
 });
 

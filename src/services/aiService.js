@@ -1,6 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+let _client = null;
+function getClient() {
+  if (!_client) {
+    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  }
+  return _client;
+}
 
 function buildSystemPrompt(systemPrompt, faqs) {
   const parts = [];
@@ -53,7 +59,7 @@ export async function generateResponse(message, { systemPrompt = "", faqs = [], 
   for (const model of models) {
     try {
       console.log(`[AI] Intentando con modelo: ${model}`);
-      const response = await client.messages.create({
+      const response = await getClient().messages.create({
         model,
         max_tokens: 1024,
         ...(system ? { system } : {}),
