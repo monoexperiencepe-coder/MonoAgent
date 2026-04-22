@@ -1544,42 +1544,43 @@ app.get("/webhook", (req, res) => {
 });
 
 app.post("/webhook", express.json(), async (req, res) => {
-  // Meta exige 200 inmediato o reintenta.
-  res.sendStatus(200);
-
+  // IMPORTANTE: en Vercel serverless la función se termina al enviar la respuesta.
+  // Por eso respondemos 200 AL FINAL, después de todo el procesamiento.
   try {
     const entry = req.body?.entry?.[0];
     const change = entry?.changes?.[0];
     const value = change?.value;
 
     // Ignorar si no es mensaje de texto entrante.
-    if (!value?.messages?.length) return;
+    if (!value?.messages?.length) return res.sendStatus(200);
     const msg = value.messages[0];
-    if (msg.type !== "text") return;
+    if (msg.type !== "text") return res.sendStatus(200);
 
     const from = msg.from;
     const text = msg.text?.body?.trim();
-    if (!from || !text) return;
+    if (!from || !text) return res.sendStatus(200);
 
     const sessionId = `whatsapp:+${from}`;
+    console.log("[META] Mensaje de", sessionId, ":", text);
 
     const ownerPhone = getOwnerPhoneEnv();
     if (ownerPhone && sessionId === ownerPhone) {
       await handleInboundFromOwner(text, null);
-      return;
+    
     }
 
     const stored = await getSession(sessionId);
     if (stored?.botPaused === true) {
       console.log("[META] Bot pausado para:", sessionId);
-      return;
+      return res.sendStatus(200);
     }
 
     const myTimestamp = await appendToWhatsAppBuffer(sessionId, text);
     await new Promise((r) => setTimeout(r, 1500));
     const combinedMessage = await checkAndConsumePendingBuffer(sessionId, myTimestamp);
-    if (!combinedMessage) return;
+    if (!combinedMessage) return res.sendStatus(200);
 
+    console.log("[META] Procesando mensaje:", combinedMessage);
     const { systemPrompt, faqs } = await getAgentConfig();
     const { reply } = await runChatCore({
       sessionId,
@@ -1591,8 +1592,12 @@ app.post("/webhook", express.json(), async (req, res) => {
     if (reply?.trim()) {
       await sendWhatsAppMessage(from, reply);
     }
+
+    res.sendStatus(200);
   } catch (err) {
     console.error("[META] Error en webhook POST:", err);
+    console.error("[META] STACK:", err?.stack);
+    if (!res.headersSent) res.sendStatus(200);
   }
 });
 
