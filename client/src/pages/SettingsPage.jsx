@@ -3,6 +3,7 @@ import { fetchConfig, saveConfig } from "../services/api.js";
 
 const TABS = [
   { id: "negocio",       label: "Negocio",       icon: "🏪" },
+  { id: "horario",       label: "Horario",        icon: "🕐" },
   { id: "promos",        label: "Promos",         icon: "🎁" },
   { id: "catalogo",      label: "Catálogo",       icon: "📦" },
   { id: "instrucciones", label: "Instrucciones",  icon: "🤖" },
@@ -171,6 +172,114 @@ function TabNegocio({ config }) {
   );
 }
 
+/* ── Pestaña Horario ── */
+const DAYS_DEFAULT = [
+  { day: "Lunes",     active: true,  start: "09:00", end: "18:00" },
+  { day: "Martes",    active: true,  start: "09:00", end: "18:00" },
+  { day: "Miércoles", active: true,  start: "09:00", end: "18:00" },
+  { day: "Jueves",    active: true,  start: "09:00", end: "18:00" },
+  { day: "Viernes",   active: true,  start: "09:00", end: "18:00" },
+  { day: "Sábado",    active: false, start: "09:00", end: "13:00" },
+  { day: "Domingo",   active: false, start: "09:00", end: "13:00" },
+];
+
+function mergeDays(saved) {
+  if (!Array.isArray(saved) || !saved.length) return DAYS_DEFAULT.map(d => ({ ...d }));
+  return DAYS_DEFAULT.map(def => {
+    const found = saved.find(s => s.day === def.day);
+    return found ? { ...def, ...found } : { ...def };
+  });
+}
+
+function TabHorario({ config }) {
+  const s = config?.schedule ?? {};
+  const [days, setDays]         = useState(() => mergeDays(s.days));
+  const [timezone, setTimezone] = useState(s.timezone    ?? "America/Lima");
+  const [away, setAway]         = useState(s.awayMessage ?? "");
+  const { save, saving, msg }   = useSave();
+
+  useEffect(() => {
+    const s2 = config?.schedule ?? {};
+    setDays(mergeDays(s2.days));
+    setTimezone(s2.timezone    ?? "America/Lima");
+    setAway(s2.awayMessage ?? "");
+  }, [config]);
+
+  const toggleDay = (i) =>
+    setDays(prev => prev.map((d, idx) => idx === i ? { ...d, active: !d.active } : d));
+  const updateDay = (i, key, val) =>
+    setDays(prev => prev.map((d, idx) => idx === i ? { ...d, [key]: val } : d));
+
+  const timeInput = {
+    padding: "7px 10px", background: "#0d0d1a", border: "1px solid #2a2a3a",
+    borderRadius: 6, color: "#e2e8f0", fontSize: "0.85rem", outline: "none",
+    colorScheme: "dark",
+  };
+  const toggleStyle = (active) => ({
+    width: 38, height: 20, borderRadius: 10, cursor: "pointer", border: "none",
+    background: active ? "#8b5cf6" : "#2a2a3a", position: "relative",
+    flexShrink: 0, transition: "background 0.2s",
+  });
+  const knobStyle = (active) => ({
+    position: "absolute", top: 2, left: active ? 20 : 2, width: 16, height: 16,
+    borderRadius: "50%", background: "#fff", transition: "left 0.2s",
+  });
+
+  return (
+    <div>
+      <h2 style={C.heading}>Horario de atención</h2>
+
+      {/* Tabla de días */}
+      <div style={C.card}>
+        <p style={{ ...C.label, fontSize:"0.7rem", marginBottom:16 }}>Días y horas</p>
+        {days.map((d, i) => (
+          <div key={d.day} style={{ display:"flex", alignItems:"center", gap:16, padding:"10px 0",
+            borderBottom: i < days.length - 1 ? "1px solid #1a1a2a" : "none" }}>
+            {/* Nombre del día */}
+            <span style={{ width:90, fontSize:"0.88rem", color:"#cbd5e1", flexShrink:0 }}>{d.day}</span>
+            {/* Toggle */}
+            <button onClick={() => toggleDay(i)} style={toggleStyle(d.active)} title={d.active ? "Activo" : "Cerrado"}>
+              <span style={knobStyle(d.active)} />
+            </button>
+            {/* Horas o "Cerrado" */}
+            {d.active ? (
+              <div style={{ display:"flex", alignItems:"center", gap:8, flex:1 }}>
+                <input type="time" value={d.start} onChange={e => updateDay(i, "start", e.target.value)} style={timeInput} />
+                <span style={{ color:"#475569", fontSize:"0.8rem" }}>–</span>
+                <input type="time" value={d.end}   onChange={e => updateDay(i, "end",   e.target.value)} style={timeInput} />
+              </div>
+            ) : (
+              <span style={{ color:"#475569", fontSize:"0.82rem", fontStyle:"italic" }}>Cerrado</span>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Mensaje de ausencia */}
+      <div style={C.card}>
+        <p style={{ ...C.label, fontSize:"0.7rem", marginBottom:6 }}>Mensaje fuera de horario</p>
+        <p style={{ ...C.hint, marginBottom:14 }}>
+          El bot enviará este mensaje cuando el cliente escriba fuera del horario configurado.
+        </p>
+        <textarea style={{ ...C.textarea, minHeight:100 }} value={away} onChange={e => setAway(e.target.value)}
+          placeholder="Hola! Estamos fuera de horario. Te respondemos en cuanto volvamos 🙏" />
+        <div style={{ marginTop:16 }}>
+          <label style={C.label}>Zona horaria</label>
+          <input style={C.input} value={timezone} onChange={e => setTimezone(e.target.value)}
+            placeholder="America/Lima" />
+          <p style={C.hint}>Ejemplos: America/Lima · America/Bogota · America/Mexico_City · Europe/Madrid</p>
+        </div>
+      </div>
+
+      <button style={{ ...C.btn, ...(saving ? C.btnDisabled : {}) }} disabled={saving}
+        onClick={() => save({ schedule: { days, timezone, awayMessage: away } })}>
+        {saving ? "Guardando…" : "Guardar"}
+      </button>
+      {msg && <p style={msg.ok ? C.success : C.error}>{msg.text}</p>}
+    </div>
+  );
+}
+
 /* ── Pestaña Promos ── */
 function TabPromos({ config }) {
   const [promos, setPromos] = useState(config?.promos ?? "");
@@ -196,14 +305,251 @@ function TabPromos({ config }) {
 }
 
 /* ── Pestaña Catálogo ── */
-function TabCatalogo() {
+const EMPTY_VARIANT = () => ({ name: "", options: "" });
+const EMPTY_PRODUCT = () => ({
+  id: Date.now().toString(),
+  name: "", category: "", description: "",
+  price: "", currency: "S/",
+  imageUrl: "", imageUrl2: "", imageUrl3: "",
+  variants: [],
+});
+
+function ProductForm({ initial, onSave, onCancel }) {
+  const [p, setP] = useState(() => initial ?? EMPTY_PRODUCT());
+  const set = (key, val) => setP(prev => ({ ...prev, [key]: val }));
+
+  const addVariant    = () => setP(prev => ({ ...prev, variants: [...(prev.variants ?? []), EMPTY_VARIANT()] }));
+  const removeVariant = (i) => setP(prev => ({ ...prev, variants: prev.variants.filter((_, idx) => idx !== i) }));
+  const updateVariant = (i, key, val) =>
+    setP(prev => ({ ...prev, variants: prev.variants.map((v, idx) => idx === i ? { ...v, [key]: val } : v) }));
+
+  const inp = (key, placeholder, type = "text", extra = {}) => (
+    <input style={C.input} type={type} value={p[key] ?? ""} placeholder={placeholder}
+      onChange={e => set(key, e.target.value)} {...extra} />
+  );
+
   return (
     <div>
-      <h2 style={C.heading}>Catálogo de productos</h2>
-      <div style={{ ...C.card, textAlign:"center", padding:"48px 24px" }}>
-        <span style={{ fontSize:"3rem" }}>📦</span>
-        <p style={{ marginTop:16, color:"#475569", fontSize:"0.95rem" }}>Próximamente — carga de imágenes de producto</p>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:24 }}>
+        <h2 style={{ ...C.heading, margin:0 }}>{initial ? "Editar producto" : "Nuevo producto"}</h2>
+        <button onClick={onCancel}
+          style={{ background:"none", border:"1px solid #2a2a3a", borderRadius:8, color:"#64748b", padding:"7px 14px", cursor:"pointer", fontSize:"0.85rem" }}>
+          Cancelar
+        </button>
       </div>
+
+      {/* Info básica */}
+      <div style={C.card}>
+        <p style={{ ...C.label, fontSize:"0.7rem", marginBottom:16 }}>Información básica</p>
+        <div style={{ marginBottom:14 }}>
+          <label style={C.label}>Nombre del producto *</label>
+          {inp("name", "Ej: Polo Oversize Premium")}
+        </div>
+        <div style={{ marginBottom:14 }}>
+          <label style={C.label}>Categoría</label>
+          {inp("category", "Ej: Polos, Accesorios, Bebidas")}
+        </div>
+        <div style={{ marginBottom:0 }}>
+          <label style={C.label}>Descripción</label>
+          <textarea style={{ ...C.textarea, minHeight:80 }} value={p.description ?? ""}
+            onChange={e => set("description", e.target.value)}
+            placeholder="Descripción breve del producto…" />
+        </div>
+      </div>
+
+      {/* Precio */}
+      <div style={C.card}>
+        <p style={{ ...C.label, fontSize:"0.7rem", marginBottom:16 }}>Precio</p>
+        <div style={{ display:"flex", gap:10 }}>
+          <div style={{ flex:"0 0 90px" }}>
+            <label style={C.label}>Moneda</label>
+            {inp("currency", "S/")}
+          </div>
+          <div style={{ flex:1 }}>
+            <label style={C.label}>Precio unitario</label>
+            {inp("price", "65", "number")}
+          </div>
+        </div>
+      </div>
+
+      {/* Imágenes */}
+      <div style={C.card}>
+        <p style={{ ...C.label, fontSize:"0.7rem", marginBottom:16 }}>Imágenes (URL directa)</p>
+        {["imageUrl","imageUrl2","imageUrl3"].map((key, i) => (
+          <div key={key} style={{ marginBottom: i < 2 ? 16 : 0 }}>
+            <label style={C.label}>Imagen {i + 1}{i === 0 ? " *" : " (opcional)"}</label>
+            {inp(key, "https://...")}
+            {p[key] && (
+              <img src={p[key]} alt="" style={{ marginTop:8, height:120, borderRadius:8, objectFit:"cover", border:"1px solid #2a2a3a", display:"block" }}
+                onError={e => { e.target.style.display = "none"; }} />
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Variantes */}
+      <div style={C.card}>
+        <p style={{ ...C.label, fontSize:"0.7rem", marginBottom:6 }}>Variantes del producto</p>
+        <p style={{ ...C.hint, marginBottom:16 }}>Ej: Talla → S, M, L, XL · Color → Rojo, Azul, Negro</p>
+        {(p.variants ?? []).map((v, i) => (
+          <div key={i} style={{ display:"flex", gap:8, marginBottom:8, alignItems:"flex-start" }}>
+            <div style={{ flex:"0 0 160px" }}>
+              {i === 0 && <label style={{ ...C.label, marginBottom:4 }}>Nombre</label>}
+              <input style={C.input} value={v.name} placeholder="Ej: Talla"
+                onChange={e => updateVariant(i, "name", e.target.value)} />
+            </div>
+            <div style={{ flex:1 }}>
+              {i === 0 && <label style={{ ...C.label, marginBottom:4 }}>Opciones (separadas por coma)</label>}
+              <input style={C.input} value={v.options} placeholder="Ej: S, M, L, XL"
+                onChange={e => updateVariant(i, "options", e.target.value)} />
+            </div>
+            <button onClick={() => removeVariant(i)}
+              style={{ background:"none", border:"1px solid #3a2a2a", borderRadius:6, color:"#f87171",
+                cursor:"pointer", padding:"8px 10px", flexShrink:0, fontSize:"0.9rem",
+                marginTop: i === 0 ? 22 : 0 }}>
+              ✕
+            </button>
+          </div>
+        ))}
+        <button onClick={addVariant}
+          style={{ marginTop:8, background:"none", border:"1px dashed #2a2a4a", borderRadius:8,
+            color:"#8b5cf6", cursor:"pointer", padding:"8px 14px", fontSize:"0.83rem", fontWeight:600, width:"100%" }}>
+          ＋ Agregar variante
+        </button>
+      </div>
+
+      <button
+        disabled={!p.name?.trim()}
+        onClick={() => onSave(p)}
+        style={{ ...C.btn, ...(!p.name?.trim() ? C.btnDisabled : {}), width:"100%" }}>
+        Guardar producto
+      </button>
+    </div>
+  );
+}
+
+function TabCatalogo({ config, onConfigChange }) {
+  const [products, setProducts] = useState(() =>
+    Array.isArray(config?.catalog) ? config.catalog : []
+  );
+  const [showForm, setShowForm]       = useState(false);
+  const [editingProduct, setEditing]  = useState(null);
+  const [saving, setSaving]           = useState(false);
+  const [msg, setMsg]                 = useState(null);
+
+  useEffect(() => {
+    setProducts(Array.isArray(config?.catalog) ? config.catalog : []);
+  }, [config]);
+
+  const persist = async (updated) => {
+    setSaving(true); setMsg(null);
+    try {
+      await saveConfig({ catalog: updated });
+      setMsg({ ok: true, text: "Guardado ✓" });
+      if (onConfigChange) onConfigChange({ ...config, catalog: updated });
+      setTimeout(() => setMsg(null), 3000);
+    } catch (e) {
+      setMsg({ ok: false, text: e?.message ?? "Error al guardar" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSave = async (product) => {
+    const updated = editingProduct
+      ? products.map(p => p.id === product.id ? product : p)
+      : [...products, { ...product, id: product.id || Date.now().toString() }];
+    setProducts(updated);
+    await persist(updated);
+    setShowForm(false);
+    setEditing(null);
+  };
+
+  const handleDelete = async (id) => {
+    if (!window.confirm("¿Eliminar este producto?")) return;
+    const updated = products.filter(p => p.id !== id);
+    setProducts(updated);
+    await persist(updated);
+  };
+
+  const handleEdit = (product) => {
+    setEditing(product);
+    setShowForm(true);
+  };
+
+  if (showForm) {
+    return (
+      <ProductForm
+        initial={editingProduct}
+        onSave={handleSave}
+        onCancel={() => { setShowForm(false); setEditing(null); }}
+      />
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:24 }}>
+        <h2 style={{ ...C.heading, margin:0 }}>Catálogo de productos</h2>
+        <button onClick={() => { setEditing(null); setShowForm(true); }}
+          style={{ ...C.btn, marginTop:0 }}>
+          ＋ Nuevo producto
+        </button>
+      </div>
+
+      {msg && <p style={{ ...(msg.ok ? C.success : C.error), marginBottom:12 }}>{msg.text}</p>}
+
+      {!products.length ? (
+        <div style={{ ...C.card, textAlign:"center", padding:"48px 24px" }}>
+          <span style={{ fontSize:"3rem" }}>📦</span>
+          <p style={{ marginTop:16, color:"#475569", fontSize:"0.95rem" }}>
+            No hay productos aún. Agrega tu primer producto.
+          </p>
+        </div>
+      ) : (
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:16 }}>
+          {products.map(prod => (
+            <div key={prod.id} style={{ background:"#13131f", border:"1px solid #1e1e2e", borderRadius:12, overflow:"hidden", display:"flex", flexDirection:"column" }}>
+              {prod.imageUrl && (
+                <img src={prod.imageUrl} alt={prod.name}
+                  style={{ width:"100%", height:160, objectFit:"cover", display:"block" }}
+                  onError={e => { e.target.style.display = "none"; }} />
+              )}
+              <div style={{ padding:"14px 16px", flex:1, display:"flex", flexDirection:"column", gap:6 }}>
+                <p style={{ margin:0, fontWeight:700, fontSize:"0.95rem", color:"#f1f5f9" }}>{prod.name}</p>
+                {prod.category && <p style={{ margin:0, fontSize:"0.75rem", color:"#64748b" }}>{prod.category}</p>}
+                {prod.price && (
+                  <p style={{ margin:0, fontWeight:700, color:"#4ade80", fontSize:"0.9rem" }}>
+                    {prod.currency ?? "S/"} {prod.price}
+                  </p>
+                )}
+                {Array.isArray(prod.variants) && prod.variants.length > 0 && (
+                  <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginTop:4 }}>
+                    {prod.variants.map((v, i) => v.name && (
+                      <span key={i} style={{ fontSize:"0.65rem", padding:"2px 7px", borderRadius:20,
+                        background:"rgba(139,92,246,0.15)", color:"#a78bfa", border:"1px solid rgba(139,92,246,0.3)" }}>
+                        {v.name}: {v.options}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display:"flex", gap:8, marginTop:"auto", paddingTop:10 }}>
+                  <button onClick={() => handleEdit(prod)}
+                    style={{ flex:1, padding:"7px 0", background:"rgba(139,92,246,0.1)", border:"1px solid rgba(139,92,246,0.3)",
+                      borderRadius:7, color:"#a78bfa", cursor:"pointer", fontSize:"0.8rem", fontWeight:600 }}>
+                    Editar
+                  </button>
+                  <button onClick={() => handleDelete(prod.id)} disabled={saving}
+                    style={{ flex:1, padding:"7px 0", background:"rgba(248,113,113,0.08)", border:"1px solid rgba(248,113,113,0.25)",
+                      borderRadius:7, color:"#f87171", cursor:"pointer", fontSize:"0.8rem", fontWeight:600 }}>
+                    Eliminar
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -282,8 +628,9 @@ export default function SettingsPage() {
     if (!config) return <p style={{ color:"#475569", fontSize:"0.9rem" }}>{loadErr ?? "Cargando…"}</p>;
     switch (activeTab) {
       case "negocio":       return <TabNegocio        config={config} />;
+      case "horario":       return <TabHorario         config={config} />;
       case "promos":        return <TabPromos          config={config} />;
-      case "catalogo":      return <TabCatalogo />;
+      case "catalogo":      return <TabCatalogo config={config} onConfigChange={setConfig} />;
       case "instrucciones": return <TabInstrucciones   config={config} />;
       case "meta":          return <TabMeta            config={config} />;
       default:              return null;

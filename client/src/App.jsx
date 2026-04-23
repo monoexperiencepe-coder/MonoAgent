@@ -11,7 +11,7 @@ export default function App() {
     <AppStateProvider>
       <div style={{ display:"flex", height:"100vh", overflow:"hidden", background:"#0d0d1a" }}>
         <AppNav />
-        <div style={{ flex:1, minWidth:0, overflow:"hidden", display:"flex", flexDirection:"column" }}>
+        <div style={{ flex:1, minWidth:0, overflow:"hidden" }}>
           <Routes>
             <Route path="/" element={<InboxPage />} />
             <Route path="/chat" element={<ChatPage />} />
