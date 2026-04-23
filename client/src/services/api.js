@@ -92,3 +92,23 @@ export async function resumeSession(sessionId) {
   }
   return data ?? {};
 }
+
+export async function fetchConfig() {
+  const res = await fetch(`${BASE_URL}/api/config`);
+  let data = null;
+  try { data = await res.json(); } catch { data = null; }
+  if (!res.ok) throw new Error(errorTextFromResponseBody(data));
+  return data ?? {};
+}
+
+export async function saveConfig(patch) {
+  const res = await fetch(`${BASE_URL}/api/config`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  let data = null;
+  try { data = await res.json(); } catch { data = null; }
+  if (!res.ok) throw new Error(errorTextFromResponseBody(data));
+  return data ?? {};
+}

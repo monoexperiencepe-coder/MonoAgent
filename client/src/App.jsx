@@ -3,8 +3,7 @@ import { AppNav } from "./components/AppNav.jsx";
 import { AppStateProvider } from "./context/AppStateContext.jsx";
 import InboxPage from "./pages/InboxPage.jsx";
 import ChatPage from "./pages/ChatPage.jsx";
-import FAQsPage from "./pages/FAQsPage.jsx";
-import InstructionsPage from "./pages/InstructionsPage.jsx";
+import SettingsPage from "./pages/SettingsPage.jsx";
 import "./App.css";
 
 export default function App() {
@@ -12,12 +11,11 @@ export default function App() {
     <AppStateProvider>
       <div style={{ display:"flex", height:"100vh", overflow:"hidden", background:"#0d0d1a" }}>
         <AppNav />
-        <div style={{ flex:1, minWidth:0, overflow:"hidden" }}>
+        <div style={{ flex:1, minWidth:0, overflow:"hidden", display:"flex", flexDirection:"column" }}>
           <Routes>
             <Route path="/" element={<InboxPage />} />
             <Route path="/chat" element={<ChatPage />} />
-            <Route path="/instrucciones" element={<InstructionsPage />} />
-            <Route path="/faqs" element={<FAQsPage />} />
+            <Route path="/configuracion" element={<SettingsPage />} />
           </Routes>
         </div>
       </div>

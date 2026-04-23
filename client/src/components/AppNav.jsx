@@ -3,8 +3,7 @@ import { NavLink } from "react-router-dom";
 const links = [
   { to: "/", label: "Buzón", icon: "📥", end: true },
   { to: "/chat", label: "Chat AI", icon: "💬", end: false },
-  { to: "/instrucciones", label: "Instrucciones", icon: "⚙️", end: false },
-  { to: "/faqs", label: "FAQs", icon: "❓", end: false },
+  { to: "/configuracion", label: "Configuración", icon: "⚙️", end: false },
 ];
 
 export function AppNav() {

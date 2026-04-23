@@ -1504,7 +1504,14 @@ app.post("/whatsapp", twilioWebhookParser, async (req, res) => {
 
 async function sendWhatsAppMessage(to, text) {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  // Token: primero config guardada en Supabase, luego variable de entorno.
+  let accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  try {
+    const cfg = await getAgentConfig();
+    if (cfg?.whatsappToken) accessToken = cfg.whatsappToken;
+  } catch {
+    // fallback al env var
+  }
   const url = `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`;
 
   const response = await fetch(url, {
@@ -1566,7 +1573,7 @@ app.post("/webhook", express.json(), async (req, res) => {
     const ownerPhone = getOwnerPhoneEnv();
     if (ownerPhone && sessionId === ownerPhone) {
       await handleInboundFromOwner(text, null);
-    
+      return res.sendStatus(200);
     }
 
     const stored = await getSession(sessionId);
@@ -1598,6 +1605,39 @@ app.post("/webhook", express.json(), async (req, res) => {
     console.error("[META] Error en webhook POST:", err);
     console.error("[META] STACK:", err?.stack);
     if (!res.headersSent) res.sendStatus(200);
+  }
+});
+
+/* ── GET /api/config ─────────────────────────────────────── */
+app.get("/api/config", async (_req, res) => {
+  try {
+    const cfg = await getAgentConfig();
+    res.json({
+      systemPrompt:  cfg.systemPrompt  ?? "",
+      faqs:          cfg.faqs          ?? [],
+      whatsappToken: cfg.whatsappToken ?? "",
+      promos:        cfg.promos        ?? "",
+      business:      cfg.business      ?? {},
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
+  }
+});
+
+/* ── POST /api/config ────────────────────────────────────── */
+app.post("/api/config", async (req, res) => {
+  try {
+    const { systemPrompt, faqs, whatsappToken, promos, business } = req.body ?? {};
+    const patch = {};
+    if (systemPrompt  !== undefined) patch.systemPrompt  = systemPrompt;
+    if (faqs          !== undefined) patch.faqs          = faqs;
+    if (whatsappToken !== undefined) patch.whatsappToken = whatsappToken;
+    if (promos        !== undefined) patch.promos        = promos;
+    if (business      !== undefined) patch.business      = business;
+    await saveAgentConfig(patch);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e?.message || String(e) });
   }
 });
 
