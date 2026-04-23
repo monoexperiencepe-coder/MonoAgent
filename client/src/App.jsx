@@ -3,6 +3,7 @@ import { AppNav } from "./components/AppNav.jsx";
 import { AppStateProvider } from "./context/AppStateContext.jsx";
 import InboxPage from "./pages/InboxPage.jsx";
 import ChatPage from "./pages/ChatPage.jsx";
+import PipelinePage from "./pages/PipelinePage.jsx";
 import SettingsPage from "./pages/SettingsPage.jsx";
 import "./App.css";
 
@@ -15,6 +16,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<InboxPage />} />
             <Route path="/chat" element={<ChatPage />} />
+            <Route path="/pipeline" element={<PipelinePage />} />
             <Route path="/configuracion" element={<SettingsPage />} />
           </Routes>
         </div>
