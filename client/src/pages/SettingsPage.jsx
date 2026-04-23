@@ -52,6 +52,7 @@ const EMPTY_FIELD = () => ({ label: "", value: "" });
 
 function TabNegocio({ config }) {
   const b = config?.business ?? {};
+  const [logoBase64, setLogoBase64] = useState(b.logo       ?? "");
   const [name,       setName]       = useState(b.name        ?? "");
   const [industry,   setIndustry]   = useState(b.industry    ?? "");
   const [desc,       setDesc]       = useState(b.description ?? "");
@@ -62,7 +63,6 @@ function TabNegocio({ config }) {
   const [website,    setWebsite]    = useState(b.website     ?? "");
   const [instagram,  setInstagram]  = useState(b.instagram   ?? "");
   const [address,    setAddress]    = useState(b.address     ?? "");
-  const [hours,      setHours]      = useState(b.hours       ?? "");
   const [customFields, setCustomFields] = useState(
     Array.isArray(b.customFields) && b.customFields.length ? b.customFields : []
   );
@@ -70,30 +70,39 @@ function TabNegocio({ config }) {
 
   useEffect(() => {
     const b2 = config?.business ?? {};
-    setName(b2.name        ?? "");
-    setIndustry(b2.industry    ?? "");
-    setDesc(b2.description ?? "");
-    setPhone1(b2.phone1      ?? "");
-    setPhone2(b2.phone2      ?? "");
-    setWhatsapp(b2.whatsapp    ?? "");
-    setEmail(b2.email       ?? "");
-    setWebsite(b2.website     ?? "");
-    setInstagram(b2.instagram   ?? "");
-    setAddress(b2.address     ?? "");
-    setHours(b2.hours       ?? "");
+    setLogoBase64(b2.logo        ?? "");
+    setName(b2.name              ?? "");
+    setIndustry(b2.industry      ?? "");
+    setDesc(b2.description       ?? "");
+    setPhone1(b2.phone1          ?? "");
+    setPhone2(b2.phone2          ?? "");
+    setWhatsapp(b2.whatsapp      ?? "");
+    setEmail(b2.email            ?? "");
+    setWebsite(b2.website        ?? "");
+    setInstagram(b2.instagram    ?? "");
+    setAddress(b2.address        ?? "");
     setCustomFields(Array.isArray(b2.customFields) && b2.customFields.length ? b2.customFields : []);
   }, [config]);
 
-  const addCustomField  = () => setCustomFields(prev => [...prev, EMPTY_FIELD()]);
+  const handleLogoChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => setLogoBase64(ev.target.result);
+    reader.readAsDataURL(file);
+  };
+
+  const addCustomField    = () => setCustomFields(prev => [...prev, EMPTY_FIELD()]);
   const removeCustomField = (i) => setCustomFields(prev => prev.filter((_, idx) => idx !== i));
   const updateCustomField = (i, key, val) =>
     setCustomFields(prev => prev.map((f, idx) => idx === i ? { ...f, [key]: val } : f));
 
   const handleSave = () => save({
     business: {
+      logo: logoBase64,
       name, industry, description: desc,
       phone1, phone2, whatsapp, email,
-      website, instagram, address, hours,
+      website, instagram, address,
       customFields: customFields.filter(f => f.label.trim() || f.value.trim()),
     },
   });
@@ -108,6 +117,19 @@ function TabNegocio({ config }) {
   return (
     <div>
       <h2 style={C.heading}>Datos del negocio</h2>
+
+      {/* Logo */}
+      <div style={C.card}>
+        <p style={{ ...C.label, fontSize:"0.7rem", marginBottom:16 }}>Logo del negocio</p>
+        {logoBase64 && (
+          <img src={logoBase64} alt="Logo"
+            style={{ height:80, borderRadius:8, objectFit:"contain", border:"1px solid #2a2a3a", display:"block", marginBottom:12, background:"#0d0d1a", padding:4 }}
+            onError={e => { e.target.style.display = "none"; }} />
+        )}
+        <input type="file" accept="image/*" onChange={handleLogoChange}
+          style={{ color:"#94a3b8", fontSize:"0.85rem", cursor:"pointer" }} />
+        <p style={C.hint}>Se convierte a base64 y se guarda en la configuración.</p>
+      </div>
 
       {/* Información principal */}
       <div style={C.card}>
@@ -134,10 +156,9 @@ function TabNegocio({ config }) {
       {/* Presencia online */}
       <div style={C.card}>
         <p style={{ ...C.label, fontSize:"0.7rem", marginBottom:16 }}>Presencia online y ubicación</p>
-        {field("Sitio web",          website,   setWebsite,   "https://negocio.com")}
-        {field("Instagram",          instagram, setInstagram, "@negocio")}
-        {field("Dirección",          address,   setAddress,   "Av. Principal 123, Lima")}
-        {field("Horario de atención",hours,     setHours,     "Lun-Vie 9am-6pm, Sáb 10am-2pm")}
+        {field("Sitio web",  website,   setWebsite,   "https://negocio.com")}
+        {field("Instagram",  instagram, setInstagram, "@negocio")}
+        {field("Dirección",  address,   setAddress,   "Av. Principal 123, Lima")}
       </div>
 
       {/* Campos personalizados */}
@@ -310,13 +331,39 @@ const EMPTY_PRODUCT = () => ({
   id: Date.now().toString(),
   name: "", category: "", description: "",
   price: "", currency: "S/",
-  imageUrl: "", imageUrl2: "", imageUrl3: "",
+  image1: "", image2: "", image3: "",
   variants: [],
 });
 
+const IMAGE_KEYS = ["image1", "image2", "image3"];
+const IMAGE_LABELS = ["Imagen principal", "Imagen 2 (opcional)", "Imagen 3 (opcional)"];
+
+function readFileAsBase64(file) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => resolve(e.target.result);
+    reader.readAsDataURL(file);
+  });
+}
+
 function ProductForm({ initial, onSave, onCancel }) {
-  const [p, setP] = useState(() => initial ?? EMPTY_PRODUCT());
+  const [p, setP] = useState(() => {
+    const base = initial ?? EMPTY_PRODUCT();
+    // Migrate legacy imageUrl fields to image1/2/3
+    return {
+      ...base,
+      image1: base.image1 ?? base.imageUrl  ?? "",
+      image2: base.image2 ?? base.imageUrl2 ?? "",
+      image3: base.image3 ?? base.imageUrl3 ?? "",
+    };
+  });
   const set = (key, val) => setP(prev => ({ ...prev, [key]: val }));
+
+  const handleImageFile = async (key, file) => {
+    if (!file) return;
+    const b64 = await readFileAsBase64(file);
+    set(key, b64);
+  };
 
   const addVariant    = () => setP(prev => ({ ...prev, variants: [...(prev.variants ?? []), EMPTY_VARIANT()] }));
   const removeVariant = (i) => setP(prev => ({ ...prev, variants: prev.variants.filter((_, idx) => idx !== i) }));
@@ -374,13 +421,16 @@ function ProductForm({ initial, onSave, onCancel }) {
 
       {/* Imágenes */}
       <div style={C.card}>
-        <p style={{ ...C.label, fontSize:"0.7rem", marginBottom:16 }}>Imágenes (URL directa)</p>
-        {["imageUrl","imageUrl2","imageUrl3"].map((key, i) => (
-          <div key={key} style={{ marginBottom: i < 2 ? 16 : 0 }}>
-            <label style={C.label}>Imagen {i + 1}{i === 0 ? " *" : " (opcional)"}</label>
-            {inp(key, "https://...")}
+        <p style={{ ...C.label, fontSize:"0.7rem", marginBottom:16 }}>Imágenes del producto</p>
+        {IMAGE_KEYS.map((key, i) => (
+          <div key={key} style={{ marginBottom: i < IMAGE_KEYS.length - 1 ? 20 : 0 }}>
+            <label style={C.label}>{IMAGE_LABELS[i]}</label>
+            <input type="file" accept="image/*"
+              style={{ color:"#94a3b8", fontSize:"0.85rem", cursor:"pointer", display:"block" }}
+              onChange={e => handleImageFile(key, e.target.files?.[0])} />
             {p[key] && (
-              <img src={p[key]} alt="" style={{ marginTop:8, height:120, borderRadius:8, objectFit:"cover", border:"1px solid #2a2a3a", display:"block" }}
+              <img src={p[key]} alt=""
+                style={{ marginTop:8, height:100, borderRadius:8, objectFit:"cover", border:"1px solid #2a2a3a", display:"block" }}
                 onError={e => { e.target.style.display = "none"; }} />
             )}
           </div>
@@ -510,8 +560,8 @@ function TabCatalogo({ config, onConfigChange }) {
         <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:16 }}>
           {products.map(prod => (
             <div key={prod.id} style={{ background:"#13131f", border:"1px solid #1e1e2e", borderRadius:12, overflow:"hidden", display:"flex", flexDirection:"column" }}>
-              {prod.imageUrl && (
-                <img src={prod.imageUrl} alt={prod.name}
+              {(prod.image1 ?? prod.imageUrl) && (
+                <img src={prod.image1 ?? prod.imageUrl} alt={prod.name}
                   style={{ width:"100%", height:160, objectFit:"cover", display:"block" }}
                   onError={e => { e.target.style.display = "none"; }} />
               )}

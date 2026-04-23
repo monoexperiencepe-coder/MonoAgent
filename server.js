@@ -1608,36 +1608,22 @@ app.post("/webhook", express.json(), async (req, res) => {
   }
 });
 
-/* ── GET /api/config ─────────────────────────────────────── */
 app.get("/api/config", async (_req, res) => {
   try {
-    const cfg = await getAgentConfig();
-    res.json({
-      systemPrompt:  cfg.systemPrompt  ?? "",
-      faqs:          cfg.faqs          ?? [],
-      whatsappToken: cfg.whatsappToken ?? "",
-      promos:        cfg.promos        ?? "",
-      business:      cfg.business      ?? {},
-    });
-  } catch (e) {
-    res.status(500).json({ error: e?.message || String(e) });
+    const config = await getAgentConfig();
+    res.json(config);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
-/* ── POST /api/config ────────────────────────────────────── */
 app.post("/api/config", async (req, res) => {
   try {
-    const { systemPrompt, faqs, whatsappToken, promos, business } = req.body ?? {};
-    const patch = {};
-    if (systemPrompt  !== undefined) patch.systemPrompt  = systemPrompt;
-    if (faqs          !== undefined) patch.faqs          = faqs;
-    if (whatsappToken !== undefined) patch.whatsappToken = whatsappToken;
-    if (promos        !== undefined) patch.promos        = promos;
-    if (business      !== undefined) patch.business      = business;
-    await saveAgentConfig(patch);
+    await saveAgentConfig(req.body);
     res.json({ ok: true });
-  } catch (e) {
-    res.status(500).json({ error: e?.message || String(e) });
+  } catch (err) {
+    console.error("[api/config] error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
