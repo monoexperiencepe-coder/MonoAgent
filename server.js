@@ -867,13 +867,17 @@ Para programar tu envío necesito:
 PROHIBIDO en este turno: volver a preguntar cantidad, pedir elegir entre tallas, o reabrir el paso de "¿cuántos te llevo?".`;
 }
 
+/**
+ * Snapshot del estado para inyectar en el system prompt del LLM.
+ * NO incluye `messages` (el historial va aparte como mensajes Anthropic reales,
+ * meterlo aquí duplica el contexto y confunde al modelo).
+ */
 function sessionStateForPrompt(session) {
   const cd = session.customerData && typeof session.customerData === "object" ? session.customerData : {};
   const rec = normalizeSessionSizeToken(session.recommendedSize) || null;
   const lo = session.lastOrphanQty;
   const lastOrphanQty =
     lo != null && Number.isFinite(Number(lo)) && Number(lo) >= 1 ? Math.min(Math.floor(Number(lo)), 9999) : null;
-  const msgHist = Array.isArray(session.messages) ? session.messages : [];
   return {
     product: session.product,
     items: session.items,
@@ -883,6 +887,16 @@ function sessionStateForPrompt(session) {
     customerData: { ...cd },
     recommendedSize: rec,
     lastOrphanQty,
+  };
+}
+
+/**
+ * Snapshot completo para persistir en Supabase. Incluye `messages` (historial serializado).
+ */
+function sessionStateForSave(session) {
+  const msgHist = Array.isArray(session.messages) ? session.messages : [];
+  return {
+    ...sessionStateForPrompt(session),
     messages: msgHist.map((m) => ({ role: m.role, content: String(m.content ?? "") })),
   };
 }
@@ -1112,9 +1126,6 @@ const distPath = existsSync(join(__dirname, "client/dist"))
 /** sessionId → buffer de mensajes cortos (<3 palabras) antes de procesar (debounce 2s). */
 const messageBuffers = new Map();
 
-/** sessionId → historial Anthropic [{ role, content }] (hasta 40 entradas en memoria). */
-const sessionHistories = new Map();
-
 /** Núcleo compartido entre /chat y /whatsapp (sesión, LLM, persistencia). */
 async function runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs }) {
   console.log("[SESSION] Buscando sesión:", sessionId);
@@ -1144,14 +1155,9 @@ async function runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs }) {
   const basePrompt = typeof systemPrompt === "string" ? systemPrompt : "";
   const augmentedSystem = [basePrompt, buildSessionSystemAugmentation(session)].filter(Boolean).join("\n\n");
 
-  if (!sessionHistories.has(sessionId)) {
-    sessionHistories.set(sessionId, []);
-  }
-  let history = sessionHistories.get(sessionId);
-  if (history.length === 0 && session.messages.length > 0) {
-    sessionHistories.set(sessionId, session.messages.slice(-40));
-    history = sessionHistories.get(sessionId);
-  }
+  // Fuente única de historial: session.messages persistido en Supabase.
+  // En Vercel serverless no se puede confiar en Maps en memoria entre invocaciones.
+  const history = Array.isArray(session.messages) ? [...session.messages] : [];
 
   let reply = await generateResponse(trimmedMessage, {
     systemPrompt: augmentedSystem,
@@ -1171,14 +1177,15 @@ async function runChatCore({ sessionId, trimmedMessage, systemPrompt, faqs }) {
 
   session.promoShown = true;
 
-  history.push({ role: "user", content: trimmedMessage });
-  history.push({ role: "assistant", content: reply });
-  if (history.length > 40) {
-    history.splice(0, history.length - 40);
+  // Siempre registramos el turno del usuario; el del assistant solo si tuvo contenido real
+  // (evita meter "" en el historial cuando el LLM falla).
+  const updatedHistory = [...history, { role: "user", content: trimmedMessage }];
+  if (reply && reply.trim()) {
+    updatedHistory.push({ role: "assistant", content: reply });
   }
-  session.messages = history.slice(-20);
+  session.messages = updatedHistory.slice(-20);
 
-  const stateSnapshot = sessionStateForPrompt(session);
+  const stateSnapshot = sessionStateForSave(session);
   console.log("[SESSION] Guardando sesión:", sessionId, stateSnapshot);
   try {
     await saveSession(sessionId, stateSnapshot);

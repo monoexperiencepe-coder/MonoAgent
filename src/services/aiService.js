@@ -1,5 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 
+const MODEL = "claude-haiku-4-5-20251001";
+const LLM_TIMEOUT_MS = 8000;
+
 let _client = null;
 function getClient() {
   if (!_client) {
@@ -48,29 +51,30 @@ function sanitizeAnthropicHistory(history) {
 
 export async function generateResponse(message, { systemPrompt = "", faqs = [], history = [] } = {}) {
   const system = buildSystemPrompt(systemPrompt, faqs);
-  const models = ["claude-haiku-4-5-20251001", "claude-opus-4-6"];
-  let trimmedHistory = sanitizeAnthropicHistory(history).slice(-20);
+
+  let trimmedHistory = sanitizeAnthropicHistory(history).slice(-10);
   while (trimmedHistory.length > 0 && trimmedHistory[0].role === "assistant") {
     trimmedHistory = trimmedHistory.slice(1);
   }
+
   const userContent = String(message ?? "").trim();
   const messages = [...trimmedHistory, { role: "user", content: userContent || " " }];
 
-  for (const model of models) {
-    try {
-      console.log(`[AI] Intentando con modelo: ${model}`);
-      const response = await getClient().messages.create({
-        model,
+  try {
+    console.log(`[AI] Enviando al modelo: ${MODEL}`);
+    const response = await getClient().messages.create(
+      {
+        model: MODEL,
         max_tokens: 1024,
         ...(system ? { system } : {}),
         messages,
-      });
-      console.log(`[AI] Éxito con: ${model}`);
-      const block = response.content?.find((b) => b.type === "text");
-      return block?.text ?? "";
-    } catch (err) {
-      console.error(`[AI] Falló ${model}:`, err.message);
-    }
+      },
+      { timeout: LLM_TIMEOUT_MS }
+    );
+    const block = response.content?.find((b) => b.type === "text");
+    return block?.text ?? "";
+  } catch (err) {
+    console.error(`[AI] Error/timeout con ${MODEL}:`, err?.message ?? err);
+    return "";
   }
-  throw new Error("Todos los modelos fallaron");
 }
