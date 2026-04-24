@@ -10,6 +10,7 @@ import { dirname, join } from "path";
 import twilio from "twilio";
 import { generateResponse } from "./src/services/aiService.js";
 import { getAgentConfig, saveAgentConfig } from "./src/lib/agentConfig.js";
+import { getSupabase } from "./src/lib/supabase.js";
 import {
   getSession,
   saveSession,
@@ -1566,6 +1567,18 @@ app.post("/webhook", express.json(), async (req, res) => {
     const from = msg.from;
     const text = msg.text?.body?.trim();
     if (!from || !text) return res.sendStatus(200);
+
+    const wamid = msg.id;
+    if (wamid) {
+      const supabase = getSupabase();
+      const { error: wamidError } = await supabase
+        .from("processed_wamids")
+        .insert({ id: wamid, created_at: new Date().toISOString() });
+      if (wamidError?.code === "23505") {
+        console.log("[META] wamid duplicado, ignorando:", wamid);
+        return res.sendStatus(200);
+      }
+    }
 
     const sessionId = `whatsapp:+${from}`;
     console.log("[META] Mensaje de", sessionId, ":", text);
